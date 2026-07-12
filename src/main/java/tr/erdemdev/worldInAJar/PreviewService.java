@@ -21,6 +21,7 @@ public final class PreviewService {
     private final InteriorService interiors;
     private final NamespacedKey displayKey;
     private final Map<UUID, JarScene> scenes = new HashMap<>();
+    private final Map<Integer, List<OutsideOffset>> outsideOffsets = new HashMap<>();
     private JarRepository repository;
     private int taskId = -1;
     private long ticks;
@@ -268,23 +269,38 @@ public final class PreviewService {
         if (maximum == 0) return List.of();
         Location origin = jar.outsideLocation();
         List<OutsideSample> result = new ArrayList<>(maximum);
-        // Visit nearby layers first on both sides of relative Y zero. The support block directly
-        // below the jar is rendered separately as the cell-wide floor.
-        outer: for (int layer = 0; layer <= radius * 2; layer++) {
-            int distance = (layer + 1) / 2;
-            int dy = layer == 0 ? 0 : (layer % 2 == 1 ? -distance : distance);
-            for (int dx = -radius; dx <= radius; dx++) for (int dz = -radius; dz <= radius; dz++) {
-                if (dx == 0 && dz == 0 && (dy == 0 || dy == -1)) continue;
-                int x = origin.getBlockX() + dx, y = origin.getBlockY() + dy, z = origin.getBlockZ() + dz;
-                BlockData blockData = origin.getWorld().getBlockAt(x, y, z).getBlockData();
-                // Buried blocks would eat the whole budget before any surface is reached.
-                if (renderable(blockData.getMaterial(), true) && exposed(origin.getWorld(), x, y, z)) {
-                    result.add(new OutsideSample(dx, dy, dz, blockData));
-                    if (result.size() >= maximum) break outer;
-                }
+        World world = origin.getWorld();
+        // The support block directly below the jar is rendered separately as the cell-wide floor.
+        for (OutsideOffset offset : outsideOffsets(radius)) {
+            if (offset.dx == 0 && offset.dz == 0 && offset.dy == -1) continue;
+            int x = origin.getBlockX() + offset.dx;
+            int y = origin.getBlockY() + offset.dy;
+            int z = origin.getBlockZ() + offset.dz;
+            if (y < world.getMinHeight() || y >= world.getMaxHeight()) continue;
+            BlockData blockData = world.getBlockAt(x, y, z).getBlockData();
+            // Buried blocks would eat the whole budget before any surface is reached.
+            if (renderable(blockData.getMaterial(), true) && exposed(world, x, y, z)) {
+                result.add(new OutsideSample(offset.dx, offset.dy, offset.dz, blockData));
+                if (result.size() >= maximum) break;
             }
         }
         return result;
+    }
+
+    private List<OutsideOffset> outsideOffsets(int radius) {
+        return outsideOffsets.computeIfAbsent(radius, value -> {
+            List<OutsideOffset> offsets = new ArrayList<>();
+            int radiusSquared = value * value;
+            for (int dy = -value; dy <= value; dy++) {
+                for (int dx = -value; dx <= value; dx++) for (int dz = -value; dz <= value; dz++) {
+                    int distanceSquared = dx * dx + dy * dy + dz * dz;
+                    if (distanceSquared == 0 || distanceSquared > radiusSquared) continue;
+                    offsets.add(new OutsideOffset(dx, dy, dz, distanceSquared));
+                }
+            }
+            offsets.sort(Comparator.comparingInt(OutsideOffset::distanceSquared));
+            return List.copyOf(offsets);
+        });
     }
 
     private static boolean exposed(World world, int x, int y, int z) {
@@ -385,6 +401,8 @@ public final class PreviewService {
                 new Matrix4f().translation(-half, -half, -half).scale(scale, scale, 1));
         spawnSurface(scene, center, scene.jar.door() == org.bukkit.block.BlockFace.SOUTH ? portal : glass,
                 new Matrix4f().translation(-half, -half, half - 1).scale(scale, scale, 1));
+        spawnSurface(scene, center, glass,
+                new Matrix4f().translation(-half, -half, -half).scale(scale, 1, scale));
         spawnSurface(scene, center, glass,
                 new Matrix4f().translation(-half, half - 1, -half).scale(scale, 1, scale));
     }
@@ -545,6 +563,7 @@ public final class PreviewService {
 
     private record InteriorBox(int x, int y, int z, int sx, int sy, int sz, Material material) {}
     private record OutsideSample(int dx, int dy, int dz, BlockData blockData) {}
+    private record OutsideOffset(int dx, int dy, int dz, int distanceSquared) {}
     private record Avatar(VirtualMannequin body) {}
 
     private final class JarScene {

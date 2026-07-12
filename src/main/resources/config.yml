@@ -1,6 +1,6 @@
 # Interior edge length in blocks. Existing jars retain the scale they were created with.
 jar:
-  scale: 30
+  scale: 32
 
 interior:
   world: world_in_a_jar
@@ -27,7 +27,7 @@ preview:
 
   interior:
     enabled: true
-    # Radius of outside blocks around, above, and below the jar rendered for occupants.
+    # 3D radius of outside blocks around, above, and below the jar rendered for occupants.
     outside-radius: 6
     # Exact outside-world blocks visible to occupants. Keep this above the exposed block count
     # for the configured radius; blocks are never stretched or substituted to meet this limit.
