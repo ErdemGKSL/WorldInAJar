@@ -106,6 +106,16 @@ final class VirtualBlockDisplay extends VirtualEntity {
         display.setNoGravity(true);
         display.setInvulnerable(true);
     }
+
+    void spawn(Player viewer, Matrix4f matrix) {
+        display.setTransformation(new Transformation(matrix));
+        super.spawn(viewer);
+    }
+
+    void transform(Player viewer, Matrix4f matrix) {
+        display.setTransformation(new Transformation(matrix));
+        metadata(List.of(viewer));
+    }
 }
 
 final class VirtualMannequin extends VirtualEntity {

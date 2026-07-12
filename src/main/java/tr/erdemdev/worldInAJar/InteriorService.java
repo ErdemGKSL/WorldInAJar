@@ -90,15 +90,21 @@ public final class InteriorService {
         player.teleport(new Location(world, x, c.minY() + 1.1, z, player.getYaw(), player.getPitch()));
     }
 
-    public boolean exit(Player player, JarRepository repository) {
-        UUID jarId = sessions.remove(player.getUniqueId());
-        if (jarId == null) return false;
-        JarRecord jar = repository.byId(jarId).orElse(null);
-        if (jar == null || jar.outsideLocation() == null) return false;
+    public ExitResult exit(Player player, JarRepository repository) {
+        JarRecord jar = syncSession(player, player.getLocation(), repository);
+        if (jar == null) return ExitResult.NOT_INSIDE;
+        if (isClogged(jar)) return ExitResult.CLOGGED;
         Location destination = jar.outsideLocation().add(.5, .2, .5)
                 .add(jar.door().getModX() * 1.5, 0, jar.door().getModZ() * 1.5);
-        player.teleport(destination);
-        return true;
+        if (!player.teleport(destination)) return ExitResult.NOT_INSIDE;
+        sessions.remove(player.getUniqueId());
+        return ExitResult.EXITED;
+    }
+
+    public boolean isClogged(JarRecord jar) {
+        Location outside = jar.outsideLocation();
+        if (!jar.placed() || outside == null || outside.getBlock().getType() != Material.GLASS) return true;
+        return !outside.clone().add(jar.door().getModX(), 0, jar.door().getModZ()).getBlock().isPassable();
     }
 
     public List<Player> occupants(JarRecord jar) {
@@ -191,6 +197,8 @@ public final class InteriorService {
         return x == c.minX() || x == c.minX() + s - 1 || z == c.minZ() || z == c.minZ() + s - 1
                 || y == c.minY() || y == c.minY() + s - 1;
     }
+
+    public enum ExitResult { EXITED, NOT_INSIDE, CLOGGED }
 
     private static final class EmptyGenerator extends ChunkGenerator {
         @Override public boolean shouldGenerateNoise() { return false; }

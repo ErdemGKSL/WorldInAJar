@@ -2,6 +2,7 @@ package tr.erdemdev.worldInAJar;
 
 import org.bukkit.*;
 import org.bukkit.block.data.BlockData;
+import org.bukkit.block.data.Orientable;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 import org.bukkit.persistence.PersistentDataType;
@@ -13,6 +14,9 @@ import java.util.function.Predicate;
 
 /** Maintains viewer-specific, bidirectional display-only views for every placed jar. */
 public final class PreviewService {
+    private static final float FRONT_PORTAL_INWARD = .2f;
+    private static final float BACK_PORTAL_INWARD = -.1f;
+    private static final double PORTAL_SIDE_SWITCH_OFFSET = .1;
     private final JavaPlugin plugin;
     private final InteriorService interiors;
     private final NamespacedKey displayKey;
@@ -67,10 +71,20 @@ public final class PreviewService {
         if (scene != null) scene.removeAll();
     }
 
+    public void seal(JarRecord jar) {
+        remove(jar.id());
+        if (interiors.occupants(jar).isEmpty()) return;
+        JarScene scene = new JarScene(jar);
+        scenes.put(jar.id(), scene);
+        spawnSealedSurfaces(scene);
+        updateSealedViewers(scene);
+    }
+
     public void forget(Player player) {
         UUID id = player.getUniqueId();
         for (JarScene scene : scenes.values()) {
             scene.exteriorViewers.remove(id);
+            scene.insetPortalViewers.remove(id);
             scene.interiorViewers.remove(id);
             scene.removeAvatar(id, scene.occupants);
             scene.removeAvatar(id, scene.outsiders);
@@ -83,6 +97,21 @@ public final class PreviewService {
         Set<UUID> valid = new HashSet<>();
         for (JarRecord jar : repository.all()) {
             valid.add(jar.id());
+            if (!jar.placed()) {
+                if (interiors.occupants(jar).isEmpty()) {
+                    remove(jar.id());
+                    continue;
+                }
+                JarScene scene = scenes.computeIfAbsent(jar.id(), ignored -> new JarScene(jar));
+                if (!scene.jar.equals(jar)) {
+                    scene.removeAll();
+                    scene = new JarScene(jar);
+                    scenes.put(jar.id(), scene);
+                }
+                if (!scene.sealed) spawnSealedSurfaces(scene);
+                updateSealedViewers(scene);
+                continue;
+            }
             if (!isPlaced(jar)) {
                 remove(jar.id());
                 continue;
@@ -107,13 +136,21 @@ public final class PreviewService {
         Location jarCenter = scene.jar.outsideLocation().clone().add(.5, .5, .5);
         Set<UUID> exterior = plugin.getConfig().getBoolean("preview.exterior.enabled", true)
                 ? nearbyPlayers(jarCenter, exteriorDistance, player -> true) : Set.of();
-        applyVisibility(scene.exteriorViewers, exterior, scene.exteriorEntities());
+        applyExteriorVisibility(scene, exterior);
+        updateExteriorPortalPositions(scene);
 
         Set<UUID> interior = new HashSet<>();
         if (plugin.getConfig().getBoolean("preview.interior.enabled", true)) {
             // The outside view surrounds the whole cell, so every occupant is a viewer.
             for (Player player : interiors.occupants(scene.jar)) interior.add(player.getUniqueId());
         }
+        applyVisibility(scene.interiorViewers, interior, scene.interiorEntities());
+    }
+
+    private void updateSealedViewers(JarScene scene) {
+        applyExteriorVisibility(scene, Set.of());
+        Set<UUID> interior = new HashSet<>();
+        for (Player player : interiors.occupants(scene.jar)) interior.add(player.getUniqueId());
         applyVisibility(scene.interiorViewers, interior, scene.interiorEntities());
     }
 
@@ -132,6 +169,39 @@ public final class PreviewService {
         previous.addAll(current);
     }
 
+    private void applyExteriorVisibility(JarScene scene, Set<UUID> current) {
+        for (UUID id : scene.exteriorViewers) {
+            if (current.contains(id)) continue;
+            Player player = Bukkit.getPlayer(id);
+            if (player == null) continue;
+            for (VirtualEntity entity : scene.exteriorEntities()) entity.destroy(player);
+            if (scene.exteriorPortal != null) scene.exteriorPortal.destroy(player);
+            scene.insetPortalViewers.remove(id);
+        }
+        for (UUID id : current) {
+            if (scene.exteriorViewers.contains(id)) continue;
+            Player player = Bukkit.getPlayer(id);
+            if (player == null) continue;
+            for (VirtualEntity entity : scene.exteriorEntities()) entity.spawn(player);
+            scene.spawnPortal(player);
+        }
+        scene.exteriorViewers.clear();
+        scene.exteriorViewers.addAll(current);
+    }
+
+    private void updateExteriorPortalPositions(JarScene scene) {
+        if (scene.exteriorPortal == null) return;
+        for (UUID id : scene.exteriorViewers) {
+            Player player = Bukkit.getPlayer(id);
+            if (player == null) continue;
+            boolean inset = onDoorSide(scene.jar, player.getLocation());
+            if (inset == scene.insetPortalViewers.contains(id)) continue;
+            scene.exteriorPortal.transform(player, portalTransformation(scene.jar.door(),
+                    inset ? FRONT_PORTAL_INWARD : BACK_PORTAL_INWARD));
+            if (inset) scene.insetPortalViewers.add(id); else scene.insetPortalViewers.remove(id);
+        }
+    }
+
     private void refreshBlocks(JarScene scene, boolean forceExterior, boolean forceInterior) {
         scene.invalid = false;
 
@@ -145,10 +215,14 @@ public final class PreviewService {
                         + exteriorMaximum + "); the miniature is truncated.");
             // Spawn replacements before removing the old displays so viewers never see an empty frame.
             List<VirtualBlockDisplay> stale = new ArrayList<>(scene.exteriorBlocks);
+            VirtualBlockDisplay stalePortal = scene.exteriorPortal;
             scene.exteriorBlocks.clear();
+            scene.exteriorPortal = null;
             spawnExteriorBlocks(scene, interior);
             showTo(scene.exteriorViewers, scene.exteriorBlocks);
+            for (Player viewer : online(scene.exteriorViewers)) scene.spawnPortal(viewer);
             removeEntities(stale, scene.exteriorViewers);
+            if (stalePortal != null) for (Player viewer : online(scene.exteriorViewers)) stalePortal.destroy(viewer);
             scene.exteriorFingerprint = exteriorFingerprint;
         }
 
@@ -235,6 +309,29 @@ public final class PreviewService {
                     .scale(box.sx * unit - 2 * epsilon, box.sy * unit - 2 * epsilon, box.sz * unit - 2 * epsilon));
             scene.exteriorBlocks.add(display);
         }
+        spawnExteriorPortal(scene);
+    }
+
+    private void spawnExteriorPortal(JarScene scene) {
+        org.bukkit.block.BlockFace door = scene.jar.door();
+        scene.exteriorPortal = new VirtualBlockDisplay(
+                scene.jar.outsideLocation(), portalData(door), portalTransformation(door, 0f));
+    }
+
+    private static Matrix4f portalTransformation(org.bukkit.block.BlockFace door, float inward) {
+        Matrix4f transformation = new Matrix4f();
+        float offset = 0.501f - inward;
+        if (door == org.bukkit.block.BlockFace.NORTH) transformation.translate(0, 0, -offset);
+        else if (door == org.bukkit.block.BlockFace.SOUTH) transformation.translate(0, 0, offset);
+        else if (door == org.bukkit.block.BlockFace.WEST) transformation.translate(-offset, 0, 0);
+        else if (door == org.bukkit.block.BlockFace.EAST) transformation.translate(offset, 0, 0);
+        return transformation;
+    }
+
+    private static boolean onDoorSide(JarRecord jar, Location viewer) {
+        Location center = jar.outsideLocation().clone().add(.5, .5, .5);
+        double dx = viewer.getX() - center.getX(), dz = viewer.getZ() - center.getZ();
+        return dx * jar.door().getModX() + dz * jar.door().getModZ() > PORTAL_SIDE_SWITCH_OFFSET;
     }
 
     private void spawnInteriorBlocks(JarScene scene, List<OutsideSample> samples) {
@@ -278,15 +375,52 @@ public final class PreviewService {
         Location center = new Location(interiors.world(), cell.minX() + half,
                 cell.minY() + half, cell.minZ() + half);
 
-        spawnGlassSurface(scene, center, new Matrix4f().translation(-half, -half, -half).scale(1, scale, scale));
-        spawnGlassSurface(scene, center, new Matrix4f().translation(half - 1, -half, -half).scale(1, scale, scale));
-        spawnGlassSurface(scene, center, new Matrix4f().translation(-half, -half, -half).scale(scale, scale, 1));
-        spawnGlassSurface(scene, center, new Matrix4f().translation(-half, -half, half - 1).scale(scale, scale, 1));
-        spawnGlassSurface(scene, center, new Matrix4f().translation(-half, half - 1, -half).scale(scale, 1, scale));
+        BlockData glass = Material.GLASS.createBlockData();
+        BlockData portal = portalData(scene.jar.door());
+        spawnSurface(scene, center, scene.jar.door() == org.bukkit.block.BlockFace.WEST ? portal : glass,
+                new Matrix4f().translation(-half, -half, -half).scale(1, scale, scale));
+        spawnSurface(scene, center, scene.jar.door() == org.bukkit.block.BlockFace.EAST ? portal : glass,
+                new Matrix4f().translation(half - 1, -half, -half).scale(1, scale, scale));
+        spawnSurface(scene, center, scene.jar.door() == org.bukkit.block.BlockFace.NORTH ? portal : glass,
+                new Matrix4f().translation(-half, -half, -half).scale(scale, scale, 1));
+        spawnSurface(scene, center, scene.jar.door() == org.bukkit.block.BlockFace.SOUTH ? portal : glass,
+                new Matrix4f().translation(-half, -half, half - 1).scale(scale, scale, 1));
+        spawnSurface(scene, center, glass,
+                new Matrix4f().translation(-half, half - 1, -half).scale(scale, 1, scale));
     }
 
-    private void spawnGlassSurface(JarScene scene, Location center, Matrix4f transformation) {
-        scene.interiorBlocks.add(new VirtualBlockDisplay(center, Material.GLASS.createBlockData(), transformation));
+    private void spawnSealedSurfaces(JarScene scene) {
+        List<VirtualBlockDisplay> stale = new ArrayList<>(scene.interiorBlocks);
+        scene.interiorBlocks.clear();
+        CellLayout.Cell cell = interiors.cell(scene.jar);
+        int scale = scene.jar.scale();
+        float half = scale / 2f;
+        Location center = new Location(interiors.world(), cell.minX() + half,
+                cell.minY() + half, cell.minZ() + half);
+        BlockData black = Material.BLACK_CONCRETE.createBlockData();
+
+        spawnSurface(scene, center, black, new Matrix4f().translation(-half, -half, -half).scale(1, scale, scale));
+        spawnSurface(scene, center, black, new Matrix4f().translation(half - 1, -half, -half).scale(1, scale, scale));
+        spawnSurface(scene, center, black, new Matrix4f().translation(-half, -half, -half).scale(scale, scale, 1));
+        spawnSurface(scene, center, black, new Matrix4f().translation(-half, -half, half - 1).scale(scale, scale, 1));
+        spawnSurface(scene, center, black, new Matrix4f().translation(-half, -half, -half).scale(scale, 1, scale));
+        spawnSurface(scene, center, black, new Matrix4f().translation(-half, half - 1, -half).scale(scale, 1, scale));
+
+        showTo(scene.interiorViewers, scene.interiorBlocks);
+        removeEntities(stale, scene.interiorViewers);
+        scene.sealed = true;
+        scene.invalid = false;
+    }
+
+    private void spawnSurface(JarScene scene, Location center, BlockData blockData, Matrix4f transformation) {
+        scene.interiorBlocks.add(new VirtualBlockDisplay(center, blockData, transformation));
+    }
+
+    private static BlockData portalData(org.bukkit.block.BlockFace door) {
+        Orientable portal = (Orientable) Material.NETHER_PORTAL.createBlockData();
+        portal.setAxis(door == org.bukkit.block.BlockFace.NORTH || door == org.bukkit.block.BlockFace.SOUTH
+                ? Axis.X : Axis.Z);
+        return portal;
     }
 
     private void updateOccupants(JarScene scene) {
@@ -416,14 +550,17 @@ public final class PreviewService {
     private final class JarScene {
         private final JarRecord jar;
         private final List<VirtualBlockDisplay> exteriorBlocks = new ArrayList<>();
+        private VirtualBlockDisplay exteriorPortal;
         private final List<VirtualBlockDisplay> interiorBlocks = new ArrayList<>();
         private final Map<UUID, Avatar> occupants = new HashMap<>();
         private final Map<UUID, Avatar> outsiders = new HashMap<>();
         private final Set<UUID> exteriorViewers = new HashSet<>();
         private final Set<UUID> interiorViewers = new HashSet<>();
+        private final Set<UUID> insetPortalViewers = new HashSet<>();
         private int exteriorFingerprint = Integer.MIN_VALUE;
         private int interiorFingerprint = Integer.MIN_VALUE;
         private boolean invalid = true;
+        private boolean sealed;
 
         private JarScene(JarRecord jar) { this.jar = jar; }
 
@@ -431,6 +568,15 @@ public final class PreviewService {
             List<VirtualEntity> entities = new ArrayList<>(exteriorBlocks);
             for (Avatar avatar : occupants.values()) entities.add(avatar.body);
             return entities;
+        }
+
+        private void spawnPortal(Player viewer) {
+            if (exteriorPortal == null) return;
+            boolean inset = onDoorSide(jar, viewer.getLocation());
+            exteriorPortal.spawn(viewer, portalTransformation(jar.door(),
+                    inset ? FRONT_PORTAL_INWARD : BACK_PORTAL_INWARD));
+            if (inset) insetPortalViewers.add(viewer.getUniqueId());
+            else insetPortalViewers.remove(viewer.getUniqueId());
         }
 
         private List<VirtualEntity> interiorEntities() {
@@ -446,11 +592,13 @@ public final class PreviewService {
 
         private void removeAll() {
             removeEntities(exteriorBlocks, exteriorViewers);
+            if (exteriorPortal != null) for (Player viewer : online(exteriorViewers)) exteriorPortal.destroy(viewer);
             removeEntities(interiorBlocks, interiorViewers);
             for (Player viewer : online(exteriorViewers)) for (Avatar avatar : occupants.values()) avatar.body.destroy(viewer);
             for (Player viewer : online(interiorViewers)) for (Avatar avatar : outsiders.values()) avatar.body.destroy(viewer);
             exteriorBlocks.clear(); interiorBlocks.clear(); occupants.clear(); outsiders.clear();
-            exteriorViewers.clear(); interiorViewers.clear();
+            exteriorPortal = null;
+            exteriorViewers.clear(); interiorViewers.clear(); insetPortalViewers.clear();
         }
     }
 }

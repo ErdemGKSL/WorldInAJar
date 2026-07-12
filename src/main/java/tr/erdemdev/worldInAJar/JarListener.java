@@ -84,8 +84,9 @@ public final class JarListener implements Listener {
             return;
         }
         event.setDropItems(false);
-        previews.remove(jar.id());
-        repository.put(jar.pickedUp());
+        JarRecord carried = jar.pickedUp();
+        repository.put(carried);
+        previews.seal(carried);
         event.getBlock().getWorld().dropItemNaturally(event.getBlock().getLocation(), items.create(jar.id()));
     }
 
@@ -99,10 +100,16 @@ public final class JarListener implements Listener {
             if (!event.getPlayer().hasPermission("worldinajar.enter")) {
                 event.getPlayer().sendMessage("§cYou do not have permission to enter jars."); return;
             }
+            if (interiors.isClogged(jar)) {
+                event.setCancelled(true);
+                event.getPlayer().sendMessage("§cThe jar door is clogged."); return;
+            }
             event.setCancelled(true); interiors.enter(event.getPlayer(), jar); return;
         }
         if (interiors.isExitWall(event.getPlayer(), block.getLocation(), repository)) {
-            event.setCancelled(true); interiors.exit(event.getPlayer(), repository);
+            event.setCancelled(true);
+            if (interiors.exit(event.getPlayer(), repository) == InteriorService.ExitResult.CLOGGED)
+                event.getPlayer().sendMessage("§cThe jar door is clogged. You cannot leave.");
         }
     }
 
