@@ -79,6 +79,7 @@ public final class PreviewService {
 
     private void tick() {
         ticks++;
+        interiors.pruneSessions(repository);
         Set<UUID> valid = new HashSet<>();
         for (JarRecord jar : repository.all()) {
             valid.add(jar.id());
@@ -99,7 +100,6 @@ public final class PreviewService {
             updateOutsidePlayers(scene);
         }
         for (UUID id : new ArrayList<>(scenes.keySet())) if (!valid.contains(id)) remove(id);
-        interiors.pruneSessions(repository);
     }
 
     private void updateViewers(JarScene scene) {
@@ -194,11 +194,13 @@ public final class PreviewService {
         if (maximum == 0) return List.of();
         Location origin = jar.outsideLocation();
         List<OutsideSample> result = new ArrayList<>(maximum);
-        // The support block is rendered separately as one cell-wide floor. Sampling below the
-        // jar would manufacture a coarse terrain shell around it instead of preserving that view.
-        outer: for (int dy = 0; dy <= radius; dy++) {
+        // Visit nearby layers first on both sides of relative Y zero. The support block directly
+        // below the jar is rendered separately as the cell-wide floor.
+        outer: for (int layer = 0; layer <= radius * 2; layer++) {
+            int distance = (layer + 1) / 2;
+            int dy = layer == 0 ? 0 : (layer % 2 == 1 ? -distance : distance);
             for (int dx = -radius; dx <= radius; dx++) for (int dz = -radius; dz <= radius; dz++) {
-                if (dx == 0 && dy == 0 && dz == 0) continue;
+                if (dx == 0 && dz == 0 && (dy == 0 || dy == -1)) continue;
                 int x = origin.getBlockX() + dx, y = origin.getBlockY() + dy, z = origin.getBlockZ() + dz;
                 BlockData blockData = origin.getWorld().getBlockAt(x, y, z).getBlockData();
                 // Buried blocks would eat the whole budget before any surface is reached.
@@ -388,7 +390,7 @@ public final class PreviewService {
 
     private boolean isPlaced(JarRecord jar) {
         Location outside = jar.outsideLocation();
-        return outside != null && outside.getBlock().getType() == Material.GLASS;
+        return jar.placed() && outside != null && outside.getBlock().getType() == Material.GLASS;
     }
 
     private int bounded(String path, int fallback, int minimum, int maximum) {

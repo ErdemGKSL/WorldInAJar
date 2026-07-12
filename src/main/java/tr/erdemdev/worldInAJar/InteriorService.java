@@ -5,6 +5,7 @@ import org.bukkit.block.BlockFace;
 import org.bukkit.entity.Player;
 import org.bukkit.generator.ChunkGenerator;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.util.BoundingBox;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -112,18 +113,59 @@ public final class InteriorService {
 
     public void forget(Player player) { sessions.remove(player.getUniqueId()); }
 
+    public JarRecord syncSession(Player player, Location location, JarRepository repository) {
+        UUID playerId = player.getUniqueId();
+        if (location.getWorld() != world) {
+            sessions.remove(playerId);
+            return null;
+        }
+
+        UUID currentId = sessions.get(playerId);
+        JarRecord current = currentId == null ? null : repository.byId(currentId).orElse(null);
+        if (current != null && contains(current, location)) return current;
+
+        for (JarRecord jar : repository.all()) {
+            if (!contains(jar, location)) continue;
+            sessions.put(playerId, jar.id());
+            return jar;
+        }
+        sessions.remove(playerId);
+        return null;
+    }
+
+    public void destroy(JarRecord jar) {
+        Location outside = jar.outsideLocation();
+        for (UUID playerId : new ArrayList<>(sessions.keySet())) {
+            if (!jar.id().equals(sessions.get(playerId))) continue;
+            sessions.remove(playerId);
+            Player player = Bukkit.getPlayer(playerId);
+            if (player == null) continue;
+            Location destination = outside == null ? Bukkit.getWorlds().getFirst().getSpawnLocation()
+                    : outside.clone().add(.5, .2, .5)
+                    .add(jar.door().getModX() * 1.5, 0, jar.door().getModZ() * 1.5);
+            player.teleport(destination);
+        }
+
+        CellLayout.Cell c = cell(jar);
+        int size = jar.scale();
+        BoundingBox bounds = new BoundingBox(c.minX(), c.minY(), c.minZ(),
+                c.minX() + size, c.minY() + size, c.minZ() + size);
+        world.getNearbyEntities(bounds, entity -> !(entity instanceof Player)).forEach(org.bukkit.entity.Entity::remove);
+        plugin.getServer().getScheduler().runTask(plugin, new CellCleanup(c, size));
+    }
+
     public void pruneSessions(JarRepository repository) {
-        sessions.entrySet().removeIf(entry -> {
-            Player player = Bukkit.getPlayer(entry.getKey());
-            JarRecord jar = repository.byId(entry.getValue()).orElse(null);
-            return player == null || !player.isOnline() || jar == null || !contains(jar, player.getLocation());
+        sessions.keySet().removeIf(id -> {
+            Player player = Bukkit.getPlayer(id);
+            return player == null || !player.isOnline();
         });
+        for (Player player : Bukkit.getOnlinePlayers()) syncSession(player, player.getLocation(), repository);
     }
 
     public boolean isExitWall(Player player, Location block, JarRepository repository) {
         UUID id = sessions.get(player.getUniqueId());
         JarRecord jar = id == null ? null : repository.byId(id).orElse(null);
-        if (jar == null || block.getWorld() != world) return false;
+        if (jar == null || !contains(jar, block)) return false;
         CellLayout.Cell c = cell(jar); int s = jar.scale();
         return switch (jar.door()) {
             case NORTH -> block.getBlockZ() == c.minZ();
@@ -157,5 +199,36 @@ public final class InteriorService {
         @Override public boolean shouldGenerateDecorations() { return false; }
         @Override public boolean shouldGenerateMobs() { return false; }
         @Override public boolean shouldGenerateStructures() { return false; }
+    }
+
+    private final class CellCleanup implements Runnable {
+        private static final int BLOCKS_PER_TICK = 8192;
+        private final CellLayout.Cell cell;
+        private final int size;
+        private final int volume;
+        private int index;
+
+        private CellCleanup(CellLayout.Cell cell, int size) {
+            this.cell = cell;
+            this.size = size;
+            this.volume = size * size * size;
+        }
+
+        @Override
+        public void run() {
+            int end = Math.min(volume, index + BLOCKS_PER_TICK);
+            while (index < end) {
+                int x = index % size;
+                int z = (index / size) % size;
+                int y = index / (size * size);
+                world.getBlockAt(cell.minX() + x, cell.minY() + y, cell.minZ() + z).setType(Material.AIR, false);
+                index++;
+            }
+            if (index < volume) {
+                plugin.getServer().getScheduler().runTask(plugin, this);
+            } else {
+                world.getBlockAt(cell.minX(), cell.minY() - 2, cell.minZ()).setType(Material.AIR, false);
+            }
+        }
     }
 }

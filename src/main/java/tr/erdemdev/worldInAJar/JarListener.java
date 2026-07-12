@@ -1,17 +1,26 @@
 package tr.erdemdev.worldInAJar;
 
+import io.papermc.paper.event.player.PlayerInventorySlotChangeEvent;
 import org.bukkit.Material;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
+import org.bukkit.entity.Item;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.*;
 import org.bukkit.event.entity.EntityExplodeEvent;
+import org.bukkit.event.entity.EntityRemoveEvent;
+import org.bukkit.event.entity.ItemMergeEvent;
+import org.bukkit.event.player.PlayerChangedWorldEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.inventory.EquipmentSlot;
+import org.bukkit.inventory.InventoryHolder;
 
 import java.util.UUID;
 
@@ -37,7 +46,11 @@ public final class JarListener implements Listener {
         BlockFace door = horizontalOpposite(event.getPlayer().getFacing());
         UUID storedId = items.id(event.getItemInHand());
         JarRecord jar = storedId == null ? null : repository.byId(storedId).orElse(null);
-        if (jar == null) {
+        for (JarRecord stale : new java.util.ArrayList<>(repository.all())) {
+            if (stale.isAt(event.getBlockPlaced().getLocation())
+                    && (jar == null || !stale.id().equals(jar.id()))) deleteJar(stale.id());
+        }
+        if (jar == null || jar.placed()) {
             int scale = Math.max(16, Math.min(256, plugin.getConfig().getInt("jar.scale", 30)));
             jar = repository.create(event.getPlayer().getUniqueId(), event.getBlockPlaced().getLocation(), door, scale);
         } else {
@@ -72,6 +85,7 @@ public final class JarListener implements Listener {
         }
         event.setDropItems(false);
         previews.remove(jar.id());
+        repository.put(jar.pickedUp());
         event.getBlock().getWorld().dropItemNaturally(event.getBlock().getLocation(), items.create(jar.id()));
     }
 
@@ -87,7 +101,7 @@ public final class JarListener implements Listener {
             }
             event.setCancelled(true); interiors.enter(event.getPlayer(), jar); return;
         }
-        if (block.getType() == Material.GLASS && interiors.isExitWall(event.getPlayer(), block.getLocation(), repository)) {
+        if (interiors.isExitWall(event.getPlayer(), block.getLocation(), repository)) {
             event.setCancelled(true); interiors.exit(event.getPlayer(), repository);
         }
     }
@@ -96,6 +110,52 @@ public final class JarListener implements Listener {
     public void onQuit(PlayerQuitEvent event) {
         interiors.forget(event.getPlayer());
         previews.forget(event.getPlayer());
+    }
+
+    @EventHandler
+    public void onJoin(PlayerJoinEvent event) {
+        interiors.syncSession(event.getPlayer(), event.getPlayer().getLocation(), repository);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onMove(PlayerMoveEvent event) {
+        org.bukkit.Location from = event.getFrom(), to = event.getTo();
+        if (from.getWorld() == to.getWorld()
+                && from.getBlockX() == to.getBlockX()
+                && from.getBlockY() == to.getBlockY()
+                && from.getBlockZ() == to.getBlockZ()) return;
+        interiors.syncSession(event.getPlayer(), to, repository);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onRespawn(PlayerRespawnEvent event) {
+        interiors.syncSession(event.getPlayer(), event.getRespawnLocation(), repository);
+    }
+
+    @EventHandler
+    public void onWorldChange(PlayerChangedWorldEvent event) {
+        interiors.syncSession(event.getPlayer(), event.getPlayer().getLocation(), repository);
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onItemMerge(ItemMergeEvent event) {
+        if (items.isJar(event.getEntity().getItemStack()) || items.isJar(event.getTarget().getItemStack())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onItemRemoved(EntityRemoveEvent event) {
+        if (!(event.getEntity() instanceof Item item) || !destructive(event.getCause())) return;
+        UUID id = items.id(item.getItemStack());
+        if (id != null) checkDeletedNextTick(id);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onInventorySlotChange(PlayerInventorySlotChangeEvent event) {
+        UUID previous = items.id(event.getOldItemStack());
+        if (previous == null || previous.equals(items.id(event.getNewItemStack()))) return;
+        checkDeletedNextTick(previous);
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -114,6 +174,54 @@ public final class JarListener implements Listener {
         for (JarRecord jar : repository.all()) {
             if (interiors.contains(jar, location)) { previews.invalidate(jar); return; }
         }
+    }
+
+    private void checkDeletedNextTick(UUID id) {
+        plugin.getServer().getScheduler().runTask(plugin, () -> {
+            JarRecord jar = repository.byId(id).orElse(null);
+            if (jar != null && !jar.placed() && !itemExists(id)) deleteJar(id);
+        });
+    }
+
+    private boolean itemExists(UUID id) {
+        for (Player player : plugin.getServer().getOnlinePlayers()) {
+            if (contains(player.getInventory().getContents(), id)
+                    || contains(player.getEnderChest().getContents(), id)
+                    || id.equals(items.id(player.getItemOnCursor()))
+                    || contains(player.getOpenInventory().getTopInventory().getContents(), id)) return true;
+        }
+        for (org.bukkit.World world : plugin.getServer().getWorlds()) {
+            for (org.bukkit.entity.Entity entity : world.getEntities()) {
+                if (entity instanceof Item item && id.equals(items.id(item.getItemStack()))) return true;
+                if (entity instanceof InventoryHolder holder && contains(holder.getInventory().getContents(), id)) return true;
+            }
+            for (org.bukkit.Chunk chunk : world.getLoadedChunks()) {
+                for (org.bukkit.block.BlockState state : chunk.getTileEntities(false)) {
+                    if (state instanceof InventoryHolder holder && contains(holder.getInventory().getContents(), id)) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private boolean contains(org.bukkit.inventory.ItemStack[] contents, UUID id) {
+        for (org.bukkit.inventory.ItemStack item : contents) if (id.equals(items.id(item))) return true;
+        return false;
+    }
+
+    private void deleteJar(UUID id) {
+        JarRecord jar = repository.remove(id).orElse(null);
+        if (jar == null) return;
+        previews.remove(id);
+        interiors.destroy(jar);
+        plugin.getLogger().info("Deleted jar world " + id + ".");
+    }
+
+    private static boolean destructive(EntityRemoveEvent.Cause cause) {
+        return switch (cause) {
+            case DEATH, DESPAWN, EXPLODE, OUT_OF_WORLD, PLUGIN, DISCARD -> true;
+            default -> false;
+        };
     }
 
     private static BlockFace horizontalOpposite(BlockFace facing) {

@@ -36,6 +36,7 @@ public final class JarCommand implements CommandExecutor, TabCompleter {
                 if (!sender.hasPermission("worldinajar.list")) return denied(sender);
                 sender.sendMessage("§6World jars (" + plugin.repository().all().size() + "):");
                 plugin.repository().all().forEach(j -> sender.sendMessage("§e" + j.id() + " §7owner=" + j.owner()
+                        + " state=" + (j.placed() ? "placed" : "item")
                         + " outside=" + j.world() + ":" + j.x() + "," + j.y() + "," + j.z()
                         + " cell=" + j.cell() + " scale=" + j.scale()));
             }

@@ -25,6 +25,7 @@ public final class JarItems {
         item.editMeta(meta -> {
             meta.displayName(Component.text("World in a Jar"));
             meta.lore(List.of(Component.text(id == null ? "Place to create a miniature world" : "Contains a persistent miniature world")));
+            meta.setMaxStackSize(1);
             meta.getPersistentDataContainer().set(itemKey, PersistentDataType.BYTE, (byte) 1);
             if (id != null) meta.getPersistentDataContainer().set(idKey, PersistentDataType.STRING, id.toString());
         });

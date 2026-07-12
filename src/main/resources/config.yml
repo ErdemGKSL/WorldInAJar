@@ -27,7 +27,7 @@ preview:
 
   interior:
     enabled: true
-    # Radius of outside blocks around the jar rendered as cell-sized cubes for occupants.
+    # Radius of outside blocks around, above, and below the jar rendered for occupants.
     outside-radius: 6
     # Exact outside-world blocks visible to occupants. Keep this above the exposed block count
     # for the configured radius; blocks are never stretched or substituted to meet this limit.

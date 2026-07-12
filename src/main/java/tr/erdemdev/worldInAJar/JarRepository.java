@@ -31,11 +31,14 @@ public final class JarRepository {
             try {
                 String path = "jars." + key + ".";
                 UUID id = UUID.fromString(key);
+                String world = Objects.requireNonNull(yaml.getString(path + "world"));
+                int x = yaml.getInt(path + "x"), y = yaml.getInt(path + "y"), z = yaml.getInt(path + "z");
+                boolean placed = yaml.contains(path + "placed")
+                        ? yaml.getBoolean(path + "placed") : isPhysicalJar(world, x, y, z);
                 JarRecord record = new JarRecord(id, UUID.fromString(yaml.getString(path + "owner")),
-                        Objects.requireNonNull(yaml.getString(path + "world")), yaml.getInt(path + "x"),
-                        yaml.getInt(path + "y"), yaml.getInt(path + "z"),
+                        world, x, y, z,
                         BlockFace.valueOf(yaml.getString(path + "door", "NORTH")),
-                        yaml.getInt(path + "cell"), yaml.getInt(path + "scale", 60));
+                        yaml.getInt(path + "cell"), yaml.getInt(path + "scale", 60), placed);
                 records.put(id, record);
                 nextCell = Math.max(nextCell, record.cell() + 1);
             } catch (RuntimeException exception) {
@@ -54,6 +57,7 @@ public final class JarRepository {
             yaml.set(path + "x", record.x()); yaml.set(path + "y", record.y()); yaml.set(path + "z", record.z());
             yaml.set(path + "door", record.door().name()); yaml.set(path + "cell", record.cell());
             yaml.set(path + "scale", record.scale());
+            yaml.set(path + "placed", record.placed());
         }
         try { yaml.save(file); }
         catch (IOException exception) { plugin.getLogger().severe("Could not save jars.yml: " + exception.getMessage()); }
@@ -61,12 +65,22 @@ public final class JarRepository {
 
     public JarRecord create(UUID owner, Location location, BlockFace door, int scale) {
         JarRecord record = new JarRecord(UUID.randomUUID(), owner, location.getWorld().getName(),
-                location.getBlockX(), location.getBlockY(), location.getBlockZ(), door, nextCell++, scale);
+                location.getBlockX(), location.getBlockY(), location.getBlockZ(), door, nextCell++, scale, true);
         records.put(record.id(), record); save(); return record;
     }
 
     public void put(JarRecord record) { records.put(record.id(), record); save(); }
+    public Optional<JarRecord> remove(UUID id) {
+        JarRecord removed = records.remove(id);
+        if (removed != null) save();
+        return Optional.ofNullable(removed);
+    }
     public Optional<JarRecord> byId(UUID id) { return Optional.ofNullable(records.get(id)); }
     public Optional<JarRecord> at(Location location) { return records.values().stream().filter(j -> j.isAt(location)).findFirst(); }
     public Collection<JarRecord> all() { return Collections.unmodifiableCollection(records.values()); }
+
+    private boolean isPhysicalJar(String worldName, int x, int y, int z) {
+        var world = plugin.getServer().getWorld(worldName);
+        return world != null && world.getBlockAt(x, y, z).getType() == org.bukkit.Material.GLASS;
+    }
 }
