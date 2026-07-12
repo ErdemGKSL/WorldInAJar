@@ -1,0 +1,37 @@
+name: WorldInAJar
+version: '${version}'
+main: tr.erdemdev.worldInAJar.WorldInAJar
+api-version: '1.21.11'
+load: POSTWORLD
+description: Persistent, enterable miniature worlds inside craftable glass jars.
+commands:
+  jar:
+    description: Manage World in a Jar
+    usage: /jar <create|give|list|reload|exit>
+    aliases: [worldinajar, wiaj]
+permissions:
+  worldinajar.enter:
+    description: Enter placed jars
+    default: true
+  worldinajar.exit:
+    description: Exit a jar with the command
+    default: true
+  worldinajar.create:
+    description: Create a blank jar item
+    default: true
+  worldinajar.give:
+    description: Give blank jar items to players
+    default: op
+  worldinajar.list:
+    description: List persistent jars
+    default: op
+  worldinajar.reload:
+    description: Reload configuration and persistence
+    default: op
+  worldinajar.admin:
+    description: Pick up any jar without owner sneak restrictions
+    default: op
+    children:
+      worldinajar.give: true
+      worldinajar.list: true
+      worldinajar.reload: true

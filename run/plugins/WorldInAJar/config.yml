@@ -1,0 +1,37 @@
+# Interior edge length in blocks. Existing jars retain the scale they were created with.
+jar:
+  scale: 30
+
+interior:
+  world: world_in_a_jar
+  base-y: 64
+  cell-gap: 8
+  # Fixed allocation spacing prevents cells created under different scale settings overlapping.
+  # Keep this larger than the maximum allowed scale (256).
+  allocation-stride: 320
+  mob-spawning: true
+
+preview:
+  # Viewer visibility and moving player markers are updated on this interval.
+  update-ticks: 5
+  # Block scenes use fingerprints and are only rebuilt when sampled block data changes.
+  block-refresh-ticks: 100
+
+  exterior:
+    enabled: true
+    # Only players in the jar's outside world and within this distance receive virtual entity packets.
+    viewer-distance: 6.0
+    # Hard caps for visible interior block displays and occupant head/name marker pairs per jar.
+    max-blocks: 2048
+    max-player-markers: 16
+
+  interior:
+    enabled: true
+    # Radius of outside blocks around the jar rendered as cell-sized cubes for occupants.
+    outside-radius: 6
+    # Exact outside-world blocks visible to occupants. Keep this above the exposed block count
+    # for the configured radius; blocks are never stretched or substituted to meet this limit.
+    max-blocks: 4096
+    max-player-markers: 16
+    # Represent nearby outside players with viewer-specific head and name displays.
+    show-players: true
