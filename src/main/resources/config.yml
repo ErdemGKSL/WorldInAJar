@@ -28,7 +28,7 @@ preview:
   interior:
     enabled: true
     # 3D radius of outside blocks around, above, and below the jar rendered for occupants.
-    outside-radius: 6
+    outside-radius: 12
     # Exact outside-world blocks visible to occupants. Keep this above the exposed block count
     # for the configured radius; blocks are never stretched or substituted to meet this limit.
     max-blocks: 4096
