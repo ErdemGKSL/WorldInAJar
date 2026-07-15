@@ -21,7 +21,10 @@ public final class WorldInAJar extends JavaPlugin {
         // Recipe registrations survive some plugin managers' hot reload cycle. Remove the
         // old key first so enabling is idempotent instead of disabling the whole plugin.
         getServer().removeRecipe(recipeKey());
+        getServer().removeRecipe(items.portalSideRecipeKey());
+        removeLegacyCombinationRecipes();
         getServer().addRecipe(items.recipe(this));
+        getServer().addRecipe(items.portalSideRecipe());
         getServer().getPluginManager().registerEvents(
                 new JarListener(this, repository, items, interiors, previews, transfers), this);
         JarCommand executor = new JarCommand(this);
@@ -39,10 +42,18 @@ public final class WorldInAJar extends JavaPlugin {
         if (interiors != null) interiors.stop();
         if (repository != null) repository.save();
         getServer().removeRecipe(recipeKey());
+        if (items != null) getServer().removeRecipe(items.portalSideRecipeKey());
+        removeLegacyCombinationRecipes();
     }
 
     private NamespacedKey recipeKey() {
         return new NamespacedKey(this, "world_jar");
+    }
+
+    private void removeLegacyCombinationRecipes() {
+        for (int count = 2; count <= 9; count++) {
+            getServer().removeRecipe(new NamespacedKey(this, "combine_jars_" + count));
+        }
     }
 
     public void reloadPlugin() {

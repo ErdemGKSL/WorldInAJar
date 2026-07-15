@@ -28,7 +28,7 @@ public final class PreviewService {
     private final InteriorService interiors;
     private final NamespacedKey displayKey;
     private final Map<UUID, JarScene> scenes = new HashMap<>();
-    private final Map<Integer, List<OutsideOffset>> outsideOffsets = new HashMap<>();
+    private final Map<OutsideArea, List<OutsideOffset>> outsideOffsets = new HashMap<>();
     private final Set<BlockRequest> pendingBlocks = ConcurrentHashMap.newKeySet();
     private final Set<UUID> pendingPlayers = ConcurrentHashMap.newKeySet();
     private final Map<UUID, Integer> routedBlocks = new ConcurrentHashMap<>();
@@ -210,7 +210,7 @@ public final class PreviewService {
 
     private void updateViewers(JarScene scene) {
         double exteriorDistance = positive("preview.exterior.viewer-distance", 6.0);
-        Location jarCenter = scene.jar.outsideLocation().clone().add(.5, .5, .5);
+        Location jarCenter = scene.jar.outsideCenter();
         Set<UUID> exterior = plugin.getConfig().getBoolean("preview.exterior.enabled", true)
                 ? nearbyPlayers(jarCenter, exteriorDistance, player -> true) : Set.of();
         applyExteriorVisibility(scene, exterior);
@@ -273,7 +273,7 @@ public final class PreviewService {
             if (player == null) continue;
             boolean inset = onDoorSide(scene.jar, player.getLocation());
             if (inset == scene.insetPortalViewers.contains(id)) continue;
-            scene.exteriorPortal.transform(player, portalTransformation(scene.jar.door(),
+            scene.exteriorPortal.transform(player, portalTransformation(scene.jar,
                     inset ? FRONT_PORTAL_INWARD : BACK_PORTAL_INWARD));
             if (inset) scene.insetPortalViewers.add(id); else scene.insetPortalViewers.remove(id);
         }
@@ -309,7 +309,7 @@ public final class PreviewService {
                     ? bounded("preview.interior.max-blocks", 4096, 0, 16384) : 0;
             int radius = bounded("preview.interior.outside-radius", 6, 1, 24);
             List<OutsideSample> outside = sampleOutside(scene.jar, radius, outsideMaximum);
-            BlockData floor = scene.jar.outsideLocation().clone().subtract(0, 1, 0).getBlock().getBlockData();
+            BlockData floor = referenceBlock(scene.jar).subtract(0, 1, 0).getBlock().getBlockData();
             int interiorFingerprint = blockFingerprint(outside, floor, radius);
             if (scene.interiorFingerprint != interiorFingerprint) {
             List<VirtualBlockDisplay> stale = new ArrayList<>(scene.interiorBlocks);
@@ -330,11 +330,12 @@ public final class PreviewService {
     private List<InteriorBox> sampleInterior(JarRecord jar, int maximum) {
         if (maximum == 0) return List.of();
         CellLayout.Cell cell = interiors.cell(jar);
-        int scale = jar.scale();
+        int sizeX = jar.interiorSizeX(), sizeY = jar.scale(), sizeZ = jar.interiorSizeZ();
         World world = interiors.world();
         List<InteriorBox> result = new ArrayList<>();
-        for (int y = 0; y < scale - 1; y++) {
-            for (int x = 1; x < scale - 1; x++) for (int z = 1; z < scale - 1; z++) {
+        for (int y = 0; y < sizeY - 1; y++) {
+            for (int x = 1; x < sizeX - 1; x++) for (int z = 1; z < sizeZ - 1; z++) {
+                if (!jar.assembly().contains(x / jar.scale(), z / jar.scale())) continue;
                 BlockData blockData = world.getBlockAt(cell.minX() + x, cell.minY() + y,
                         cell.minZ() + z).getBlockData();
                 if (!renderable(blockData.getMaterial(), false)
@@ -351,9 +352,12 @@ public final class PreviewService {
         Location origin = jar.outsideLocation();
         List<OutsideSample> result = new ArrayList<>(maximum);
         World world = origin.getWorld();
+        JarAssembly assembly = jar.assembly();
+        Set<JarAssembly.Tile> occupied = assembly.tiles();
         // The support block directly below the jar is rendered separately as the cell-wide floor.
-        for (OutsideOffset offset : outsideOffsets(radius)) {
-            if (offset.dx == 0 && offset.dz == 0 && offset.dy == -1) continue;
+        for (OutsideOffset offset : outsideOffsets(radius, assembly)) {
+            if (occupied.contains(new JarAssembly.Tile(offset.dx, offset.dz))
+                    && (offset.dy == 0 || offset.dy == -1)) continue;
             int x = origin.getBlockX() + offset.dx;
             int y = origin.getBlockY() + offset.dy;
             int z = origin.getBlockZ() + offset.dz;
@@ -368,15 +372,20 @@ public final class PreviewService {
         return result;
     }
 
-    private List<OutsideOffset> outsideOffsets(int radius) {
-        return outsideOffsets.computeIfAbsent(radius, value -> {
+    private List<OutsideOffset> outsideOffsets(int radius, JarAssembly assembly) {
+        OutsideArea area = new OutsideArea(radius, assembly.width(), assembly.depth());
+        return outsideOffsets.computeIfAbsent(area, value -> {
             List<OutsideOffset> offsets = new ArrayList<>();
-            int radiusSquared = value * value;
-            for (int dy = -value; dy <= value; dy++) {
-                for (int dx = -value; dx <= value; dx++) for (int dz = -value; dz <= value; dz++) {
-                    int distanceSquared = dx * dx + dy * dy + dz * dz;
-                    if (distanceSquared == 0 || distanceSquared > radiusSquared) continue;
-                    offsets.add(new OutsideOffset(dx, dy, dz, distanceSquared));
+            int radiusSquared = value.radius * value.radius;
+            for (int dy = -value.radius; dy <= value.radius; dy++) {
+                for (int dx = -value.radius; dx < value.width + value.radius; dx++) {
+                    for (int dz = -value.radius; dz < value.depth + value.radius; dz++) {
+                        int distanceX = dx < 0 ? -dx : dx >= value.width ? dx - value.width + 1 : 0;
+                        int distanceZ = dz < 0 ? -dz : dz >= value.depth ? dz - value.depth + 1 : 0;
+                        int distanceSquared = distanceX * distanceX + dy * dy + distanceZ * distanceZ;
+                        if (distanceSquared > radiusSquared) continue;
+                        offsets.add(new OutsideOffset(dx, dy, dz, distanceSquared));
+                    }
                 }
             }
             offsets.sort(Comparator.comparingInt(OutsideOffset::distanceSquared));
@@ -428,13 +437,18 @@ public final class PreviewService {
     }
 
     private void spawnExteriorPortal(JarScene scene) {
+        if (!scene.jar.hasPortal()) return;
         org.bukkit.block.BlockFace door = scene.jar.door();
         scene.exteriorPortal = new VirtualBlockDisplay(
-                scene.jar.outsideLocation(), portalData(door), portalTransformation(door, 0f));
+                scene.jar.outsideLocation(), portalData(door), portalTransformation(scene.jar, 0f));
     }
 
-    private static Matrix4f portalTransformation(org.bukkit.block.BlockFace door, float inward) {
-        Matrix4f transformation = new Matrix4f();
+    private static Matrix4f portalTransformation(JarRecord jar, float inward) {
+        org.bukkit.block.BlockFace door = jar.door();
+        Location doorBlock = jar.doorBlockLocation();
+        float tileX = doorBlock.getBlockX() - jar.x();
+        float tileZ = doorBlock.getBlockZ() - jar.z();
+        Matrix4f transformation = new Matrix4f().translate(tileX, 0, tileZ);
         float offset = 0.501f - inward;
         if (door == org.bukkit.block.BlockFace.NORTH) transformation.translate(0, 0, -offset);
         else if (door == org.bukkit.block.BlockFace.SOUTH) transformation.translate(0, 0, offset);
@@ -444,9 +458,17 @@ public final class PreviewService {
     }
 
     private static boolean onDoorSide(JarRecord jar, Location viewer) {
-        Location center = jar.outsideLocation().clone().add(.5, .5, .5);
+        Location center = jar.outsideCenter();
         double dx = viewer.getX() - center.getX(), dz = viewer.getZ() - center.getZ();
         return dx * jar.door().getModX() + dz * jar.door().getModZ() > PORTAL_SIDE_SWITCH_OFFSET;
+    }
+
+    private static Location referenceBlock(JarRecord jar) {
+        Location origin = jar.outsideLocation();
+        JarAssembly.Tile tile = jar.assembly().tiles().stream()
+                .min(Comparator.comparingInt(JarAssembly.Tile::z).thenComparingInt(JarAssembly.Tile::x))
+                .orElseThrow();
+        return origin.add(tile.x(), 0, tile.z());
     }
 
     private void spawnInteriorBlocks(JarScene scene, List<OutsideSample> samples) {
@@ -456,13 +478,15 @@ public final class PreviewService {
         // into place through the transformation, since chunks that far out are never loaded.
         CellLayout.Cell cell = interiors.cell(scene.jar);
         int scale = scene.jar.scale();
-        Location center = new Location(interiors.world(), cell.minX() + scale / 2.0,
-                cell.minY() + scale / 2.0, cell.minZ() + scale / 2.0);
-        float half = scale / 2f;
+        float halfX = scene.jar.interiorSizeX() / 2f;
+        float halfY = scale / 2f;
+        float halfZ = scene.jar.interiorSizeZ() / 2f;
+        Location center = new Location(interiors.world(), cell.minX() + halfX,
+                cell.minY() + halfY, cell.minZ() + halfZ);
         for (OutsideSample sample : samples) {
             VirtualBlockDisplay display = new VirtualBlockDisplay(center, sample.blockData, new Matrix4f()
-                    .translation(sample.dx * (float) scale - half, sample.dy * (float) scale - half,
-                            sample.dz * (float) scale - half)
+                    .translation(sample.dx * (float) scale - halfX, sample.dy * (float) scale - halfY,
+                            sample.dz * (float) scale - halfZ)
                     .scale((float) scale));
             scene.interiorBlocks.add(display);
         }
@@ -472,60 +496,29 @@ public final class PreviewService {
         if (!renderable(blockData.getMaterial(), true)) return;
         CellLayout.Cell cell = interiors.cell(scene.jar);
         int scale = scene.jar.scale();
-        float half = scale / 2f;
-        Location center = new Location(interiors.world(), cell.minX() + half,
-                cell.minY() + half, cell.minZ() + half);
-        VirtualBlockDisplay display = new VirtualBlockDisplay(center, blockData,
-        // Its top face is flush with the top of the barrier floor players stand on.
-                new Matrix4f()
-                .translation(-half, 1f - half - scale, -half)
-                .scale(scale));
-        scene.interiorBlocks.add(display);
+        float sizeX = scene.jar.interiorSizeX(), sizeZ = scene.jar.interiorSizeZ();
+        float halfX = sizeX / 2f, halfY = scale / 2f, halfZ = sizeZ / 2f;
+        Location center = new Location(interiors.world(), cell.minX() + halfX,
+                cell.minY() + halfY, cell.minZ() + halfZ);
+        for (JarAssembly.Tile tile : scene.jar.assembly().tiles()) {
+            VirtualBlockDisplay display = new VirtualBlockDisplay(center, blockData,
+                    // Its top face is flush with the top of this part's barrier floor.
+                    new Matrix4f().translation(tile.x() * scale - halfX,
+                            1f - halfY - scale, tile.z() * scale - halfZ).scale(scale));
+            scene.interiorBlocks.add(display);
+        }
     }
 
     private void spawnInteriorGlassSurfaces(JarScene scene) {
-        CellLayout.Cell cell = interiors.cell(scene.jar);
-        int scale = scene.jar.scale();
-        float half = scale / 2f;
-        Location center = new Location(interiors.world(), cell.minX() + half,
-                cell.minY() + half, cell.minZ() + half);
-
-        BlockData glass = Material.GLASS.createBlockData();
-        BlockData portal = portalData(scene.jar.door());
-        spawnSurface(scene, center, scene.jar.door() == org.bukkit.block.BlockFace.WEST ? portal : glass,
-                new Matrix4f().translation(-half, -half, -half).scale(1, scale, scale));
-        spawnSurface(scene, center, scene.jar.door() == org.bukkit.block.BlockFace.EAST ? portal : glass,
-                new Matrix4f().translation(half - 1, -half, -half).scale(1, scale, scale));
-        spawnSurface(scene, center, scene.jar.door() == org.bukkit.block.BlockFace.NORTH ? portal : glass,
-                new Matrix4f().translation(-half, -half, -half).scale(scale, scale, 1));
-        spawnSurface(scene, center, scene.jar.door() == org.bukkit.block.BlockFace.SOUTH ? portal : glass,
-                new Matrix4f().translation(-half, -half, half - 1).scale(scale, scale, 1));
-        spawnSurface(scene, center, glass,
-                new Matrix4f().translation(-half, -half + .025f, -half).scale(scale, 1, scale));
-        spawnSurface(scene, center, glass,
-                new Matrix4f().translation(-half, half - 1, -half).scale(scale, 1, scale));
+        spawnAssemblySurfaces(scene, Material.GLASS.createBlockData(), true, 0f);
     }
 
     private void spawnSealedSurfaces(JarScene scene) {
         List<VirtualBlockDisplay> stale = new ArrayList<>(scene.interiorBlocks);
         scene.interiorBlocks.clear();
-        CellLayout.Cell cell = interiors.cell(scene.jar);
-        int scale = scene.jar.scale();
-        float half = scale / 2f;
-        Location center = new Location(interiors.world(), cell.minX() + half,
-                cell.minY() + half, cell.minZ() + half);
         BlockData black = Material.BLACK_CONCRETE.createBlockData();
-
-        for (org.bukkit.block.BlockFace face : List.of(org.bukkit.block.BlockFace.WEST,
-                org.bukkit.block.BlockFace.EAST, org.bukkit.block.BlockFace.NORTH,
-                org.bukkit.block.BlockFace.SOUTH)) {
-            spawnSurface(scene, center, black, interiorWallTransformation(face, half, scale,
-                    face == scene.jar.door() ? SEALED_BACKING_OUTWARD : 0f));
-        }
-        spawnSurface(scene, center, black, new Matrix4f().translation(-half, -half, -half).scale(scale, 1, scale));
-        spawnSurface(scene, center, black, new Matrix4f().translation(-half, half - 1, -half).scale(scale, 1, scale));
-        spawnSurface(scene, center, portalData(scene.jar.door()),
-                interiorWallTransformation(scene.jar.door(), half, scale, 0f));
+        spawnAssemblySurfaces(scene, black, false, SEALED_BACKING_OUTWARD);
+        if (scene.jar.hasPortal()) spawnDoorSurface(scene, portalData(scene.jar.door()), 0f);
 
         showTo(scene.interiorViewers, scene.interiorBlocks);
         removeEntities(stale, scene.interiorViewers);
@@ -534,15 +527,58 @@ public final class PreviewService {
         scene.interiorInvalid = false;
     }
 
-    private static Matrix4f interiorWallTransformation(org.bukkit.block.BlockFace face,
-                                                        float half, int scale, float outward) {
-        float x = -half;
-        float z = -half;
-        if (face == org.bukkit.block.BlockFace.EAST) x = half - 1;
-        if (face == org.bukkit.block.BlockFace.SOUTH) z = half - 1;
+    private void spawnAssemblySurfaces(JarScene scene, BlockData blockData,
+                                       boolean portalAtDoor, float doorOutward) {
+        CellLayout.Cell cell = interiors.cell(scene.jar);
+        int scale = scene.jar.scale();
+        float halfX = scene.jar.interiorSizeX() / 2f, halfY = scale / 2f;
+        float halfZ = scene.jar.interiorSizeZ() / 2f;
+        Location center = new Location(interiors.world(), cell.minX() + halfX,
+                cell.minY() + halfY, cell.minZ() + halfZ);
+        JarAssembly assembly = scene.jar.assembly();
+        JarAssembly.Tile doorTile = scene.jar.hasPortal()
+                ? new JarAssembly.Tile(scene.jar.doorX(), scene.jar.doorZ()) : null;
+        for (JarAssembly.Tile tile : assembly.tiles()) {
+            for (org.bukkit.block.BlockFace face : List.of(org.bukkit.block.BlockFace.WEST,
+                    org.bukkit.block.BlockFace.EAST, org.bukkit.block.BlockFace.NORTH,
+                    org.bukkit.block.BlockFace.SOUTH)) {
+                if (assembly.contains(tile.x() + face.getModX(), tile.z() + face.getModZ())) continue;
+                boolean door = doorTile != null && tile.equals(doorTile) && face == scene.jar.door();
+                BlockData data = portalAtDoor && door ? portalData(face) : blockData;
+                spawnSurface(scene, center, data, tileWallTransformation(tile, face, scale,
+                        halfX, halfY, halfZ, door ? doorOutward : 0f));
+            }
+            float x = tile.x() * scale - halfX, z = tile.z() * scale - halfZ;
+            spawnSurface(scene, center, blockData,
+                    new Matrix4f().translation(x, -halfY + .025f, z).scale(scale, 1, scale));
+            spawnSurface(scene, center, blockData,
+                    new Matrix4f().translation(x, halfY - 1, z).scale(scale, 1, scale));
+        }
+    }
+
+    private void spawnDoorSurface(JarScene scene, BlockData data, float outward) {
+        if (!scene.jar.hasPortal()) return;
+        CellLayout.Cell cell = interiors.cell(scene.jar);
+        int scale = scene.jar.scale();
+        float halfX = scene.jar.interiorSizeX() / 2f, halfY = scale / 2f;
+        float halfZ = scene.jar.interiorSizeZ() / 2f;
+        Location center = new Location(interiors.world(), cell.minX() + halfX,
+                cell.minY() + halfY, cell.minZ() + halfZ);
+        JarAssembly.Tile tile = new JarAssembly.Tile(scene.jar.doorX(), scene.jar.doorZ());
+        spawnSurface(scene, center, data, tileWallTransformation(tile, scene.jar.door(), scale,
+                halfX, halfY, halfZ, outward));
+    }
+
+    private static Matrix4f tileWallTransformation(JarAssembly.Tile tile, org.bukkit.block.BlockFace face,
+                                                    int scale, float halfX, float halfY,
+                                                    float halfZ, float outward) {
+        float x = tile.x() * scale - halfX;
+        float z = tile.z() * scale - halfZ;
+        if (face == org.bukkit.block.BlockFace.EAST) x += scale - 1;
+        if (face == org.bukkit.block.BlockFace.SOUTH) z += scale - 1;
         x += face.getModX() * outward;
         z += face.getModZ() * outward;
-        Matrix4f transformation = new Matrix4f().translation(x, -half, z);
+        Matrix4f transformation = new Matrix4f().translation(x, -halfY, z);
         return face == org.bukkit.block.BlockFace.NORTH || face == org.bukkit.block.BlockFace.SOUTH
                 ? transformation.scale(scale, scale, 1) : transformation.scale(1, scale, scale);
     }
@@ -588,7 +624,7 @@ public final class PreviewService {
             return;
         }
         int radius = bounded("preview.interior.outside-radius", 6, 1, 24);
-        Location jar = scene.jar.outsideLocation().clone().add(.5, .5, .5);
+        Location jar = scene.jar.outsideCenter();
         Set<UUID> present = new HashSet<>();
         int maximum = bounded("preview.interior.max-player-markers", 16, 0, 100);
         for (Player target : jar.getWorld().getNearbyPlayers(jar, radius)) {
@@ -662,7 +698,11 @@ public final class PreviewService {
 
     private boolean isPlaced(JarRecord jar) {
         Location outside = jar.outsideLocation();
-        return jar.placed() && outside != null && outside.getBlock().getType() == Material.GLASS;
+        if (!jar.placed() || outside == null) return false;
+        for (JarAssembly.Tile tile : jar.assembly().tiles()) {
+            if (outside.getBlock().getRelative(tile.x(), 0, tile.z()).getType() != Material.GLASS) return false;
+        }
+        return true;
     }
 
     private int bounded(String path, int fallback, int minimum, int maximum) {
@@ -719,7 +759,8 @@ public final class PreviewService {
             CellLayout.Cell cell = interiors.cell(jar);
             snapshots.add(new JarRoute(jar.id(), outside.getWorld().getUID(), outside.getBlockX(),
                     outside.getBlockY(), outside.getBlockZ(), radius, interiorWorld,
-                    cell.minX(), cell.minY(), cell.minZ(), jar.scale()));
+                    cell.minX(), cell.minY(), cell.minZ(), jar.interiorSizeX(), jar.scale(),
+                    jar.interiorSizeZ(), jar.width(), jar.depth()));
         }
         routes = List.copyOf(snapshots);
     }
@@ -798,19 +839,21 @@ public final class PreviewService {
     private record InteriorBox(int x, int y, int z, int sx, int sy, int sz, BlockData blockData) {}
     private record OutsideSample(int dx, int dy, int dz, BlockData blockData) {}
     private record OutsideOffset(int dx, int dy, int dz, int distanceSquared) {}
+    private record OutsideArea(int radius, int width, int depth) {}
     private record BlockRequest(UUID world, int x, int y, int z) {}
     private record JarRoute(UUID jarId, UUID outsideWorld, int outsideX, int outsideY, int outsideZ,
-                            int outsideRadius, UUID interiorWorld, int minX, int minY, int minZ, int scale) {
+                            int outsideRadius, UUID interiorWorld, int minX, int minY, int minZ,
+                            int sizeX, int sizeY, int sizeZ, int width, int depth) {
         private int route(BlockRequest block) {
             int mask = 0;
             if (block.world.equals(interiorWorld)
-                    && block.x >= minX && block.x < minX + scale
-                    && block.y >= minY && block.y < minY + scale
-                    && block.z >= minZ && block.z < minZ + scale) mask |= EXTERIOR_BLOCKS;
+                    && block.x >= minX && block.x < minX + sizeX
+                    && block.y >= minY && block.y < minY + sizeY
+                    && block.z >= minZ && block.z < minZ + sizeZ) mask |= EXTERIOR_BLOCKS;
             if (block.world.equals(outsideWorld)
-                    && Math.abs(block.x - outsideX) <= outsideRadius
+                    && block.x >= outsideX - outsideRadius && block.x < outsideX + width + outsideRadius
                     && Math.abs(block.y - outsideY) <= outsideRadius
-                    && Math.abs(block.z - outsideZ) <= outsideRadius) mask |= INTERIOR_BLOCKS;
+                    && block.z >= outsideZ - outsideRadius && block.z < outsideZ + depth + outsideRadius) mask |= INTERIOR_BLOCKS;
             return mask;
         }
     }
@@ -843,7 +886,7 @@ public final class PreviewService {
         private void spawnPortal(Player viewer) {
             if (exteriorPortal == null) return;
             boolean inset = onDoorSide(jar, viewer.getLocation());
-            exteriorPortal.spawn(viewer, portalTransformation(jar.door(),
+            exteriorPortal.spawn(viewer, portalTransformation(jar,
                     inset ? FRONT_PORTAL_INWARD : BACK_PORTAL_INWARD));
             if (inset) insetPortalViewers.add(viewer.getUniqueId());
             else insetPortalViewers.remove(viewer.getUniqueId());

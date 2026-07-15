@@ -3,6 +3,7 @@ package tr.erdemdev.worldInAJar;
 import org.bukkit.*;
 import org.bukkit.block.BlockFace;
 import org.bukkit.entity.Player;
+import org.bukkit.entity.Entity;
 import org.bukkit.generator.ChunkGenerator;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.util.BoundingBox;
@@ -10,6 +11,7 @@ import org.bukkit.util.BoundingBox;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 public final class InteriorService {
@@ -44,51 +46,126 @@ public final class InteriorService {
 
     public World world() { return world; }
     public CellLayout.Cell cell(JarRecord jar) { return CellLayout.cell(jar.cell(), stride, gap, baseY); }
+    public int maximumInteriorSize() { return Math.max(1, stride); }
+
+    public void copyRegions(JarRecord target, List<InteriorCopy> copies) {
+        ensureBuilt(target);
+        CellLayout.Cell destinationCell = cell(target);
+        for (InteriorCopy copy : copies) copyInterior(copy, target, destinationCell);
+    }
+
+    private void copyInterior(InteriorCopy copy, JarRecord target, CellLayout.Cell destinationCell) {
+        JarRecord source = copy.source();
+        ensureBuilt(source);
+        CellLayout.Cell sourceCell = cell(source);
+        int offsetX = copy.offsetX() * target.scale();
+        int offsetZ = copy.offsetZ() * target.scale();
+        for (int y = 0; y < source.scale(); y++) {
+            for (int x = 0; x < source.interiorSizeX(); x++) {
+                for (int z = 0; z < source.interiorSizeZ(); z++) {
+                    JarAssembly.Tile tile = new JarAssembly.Tile(x / source.scale(), z / source.scale());
+                    if (!copy.includes(tile)) continue;
+                    org.bukkit.block.Block block = world.getBlockAt(
+                            sourceCell.minX() + x, sourceCell.minY() + y, sourceCell.minZ() + z);
+                    if (block.getType().isAir() || block.getType() == Material.BARRIER) continue;
+                    Location destination = new Location(world, destinationCell.minX() + offsetX + x,
+                            destinationCell.minY() + y, destinationCell.minZ() + offsetZ + z);
+                    if (destination.getBlock().getType() == Material.BARRIER) continue;
+                    block.getState().copy(destination).update(true, false);
+                }
+            }
+        }
+
+        BoundingBox sourceBounds = new BoundingBox(sourceCell.minX(), sourceCell.minY(), sourceCell.minZ(),
+                sourceCell.minX() + source.interiorSizeX(), sourceCell.minY() + source.scale(),
+                sourceCell.minZ() + source.interiorSizeZ());
+        for (Entity entity : new ArrayList<>(world.getNearbyEntities(sourceBounds))) {
+            int tileX = Math.floorDiv(entity.getLocation().getBlockX() - sourceCell.minX(), source.scale());
+            int tileZ = Math.floorDiv(entity.getLocation().getBlockZ() - sourceCell.minZ(), source.scale());
+            if (!copy.includes(new JarAssembly.Tile(tileX, tileZ))) continue;
+            Location moved = entity.getLocation().clone().add(
+                    destinationCell.minX() + offsetX - sourceCell.minX(),
+                    destinationCell.minY() - sourceCell.minY(),
+                    destinationCell.minZ() + offsetZ - sourceCell.minZ());
+            if (entity.teleport(moved) && entity instanceof Player player) {
+                sessions.put(player.getUniqueId(), target.id());
+                applyEnvironment(player, target);
+            }
+        }
+    }
+
+    public record InteriorCopy(JarRecord source, int offsetX, int offsetZ, Set<JarAssembly.Tile> tiles) {
+        public InteriorCopy {
+            Set<JarAssembly.Tile> sourceTiles = source.assembly().tiles();
+            if (tiles == null) {
+                tiles = sourceTiles;
+            } else {
+                java.util.HashSet<JarAssembly.Tile> selected = new java.util.HashSet<>(tiles);
+                selected.retainAll(sourceTiles);
+                tiles = Set.copyOf(selected);
+            }
+        }
+        public boolean includes(JarAssembly.Tile tile) { return tiles.contains(tile); }
+    }
 
     public void ensureBuilt(JarRecord jar) {
         CellLayout.Cell c = cell(jar);
-        int s = jar.scale();
         // A marker below the cell makes initialization idempotent across restarts.
         if (world.getBlockAt(c.minX(), c.minY() - 2, c.minZ()).getType() == Material.BEDROCK) {
-            normalizeBoundary(c, s);
+            buildBoundary(jar, false);
             return;
         }
-        for (int x = 0; x < s; x++) for (int z = 0; z < s; z++) {
-            world.getBlockAt(c.minX() + x, c.minY(), c.minZ() + z).setType(Material.BARRIER, false);
-            world.getBlockAt(c.minX() + x, c.minY() + s - 1, c.minZ() + z).setType(Material.BARRIER, false);
-        }
-        for (int y = 1; y < s - 1; y++) for (int i = 0; i < s; i++) {
-            world.getBlockAt(c.minX(), c.minY() + y, c.minZ() + i).setType(Material.BARRIER, false);
-            world.getBlockAt(c.minX() + s - 1, c.minY() + y, c.minZ() + i).setType(Material.BARRIER, false);
-            world.getBlockAt(c.minX() + i, c.minY() + y, c.minZ()).setType(Material.BARRIER, false);
-            world.getBlockAt(c.minX() + i, c.minY() + y, c.minZ() + s - 1).setType(Material.BARRIER, false);
-        }
+        buildBoundary(jar, true);
         world.getBlockAt(c.minX(), c.minY() - 2, c.minZ()).setType(Material.BEDROCK, false);
     }
 
-    private void normalizeBoundary(CellLayout.Cell c, int size) {
-        for (int x = 0; x < size; x++) for (int z = 0; z < size; z++) {
-            world.getBlockAt(c.minX() + x, c.minY(), c.minZ() + z).setType(Material.BARRIER, false);
-            world.getBlockAt(c.minX() + x, c.minY() + size - 1, c.minZ() + z).setType(Material.BARRIER, false);
+    private void buildBoundary(JarRecord jar, boolean clearOpenEdges) {
+        CellLayout.Cell c = cell(jar);
+        int scale = jar.scale();
+        JarAssembly assembly = jar.assembly();
+        for (JarAssembly.Tile tile : assembly.tiles()) {
+            int baseX = c.minX() + tile.x() * scale;
+            int baseZ = c.minZ() + tile.z() * scale;
+            for (int x = 0; x < scale; x++) for (int z = 0; z < scale; z++) {
+                world.getBlockAt(baseX + x, c.minY(), baseZ + z).setType(Material.BARRIER, false);
+                world.getBlockAt(baseX + x, c.minY() + scale - 1, baseZ + z).setType(Material.BARRIER, false);
+            }
+            for (int y = 1; y < scale - 1; y++) {
+                boundaryPlane(assembly.contains(tile.x() - 1, tile.z()), clearOpenEdges,
+                        baseX, c.minY() + y, baseZ, 0, 1, scale);
+                boundaryPlane(assembly.contains(tile.x() + 1, tile.z()), clearOpenEdges,
+                        baseX + scale - 1, c.minY() + y, baseZ, 0, 1, scale);
+                boundaryPlane(assembly.contains(tile.x(), tile.z() - 1), clearOpenEdges,
+                        baseX, c.minY() + y, baseZ, 1, 0, scale);
+                boundaryPlane(assembly.contains(tile.x(), tile.z() + 1), clearOpenEdges,
+                        baseX, c.minY() + y, baseZ + scale - 1, 1, 0, scale);
+            }
         }
-        for (int y = 1; y < size - 1; y++) for (int i = 0; i < size; i++) {
-            world.getBlockAt(c.minX(), c.minY() + y, c.minZ() + i).setType(Material.BARRIER, false);
-            world.getBlockAt(c.minX() + size - 1, c.minY() + y, c.minZ() + i).setType(Material.BARRIER, false);
-            world.getBlockAt(c.minX() + i, c.minY() + y, c.minZ()).setType(Material.BARRIER, false);
-            world.getBlockAt(c.minX() + i, c.minY() + y, c.minZ() + size - 1).setType(Material.BARRIER, false);
+    }
+
+    private void boundaryPlane(boolean open, boolean clearOpen, int x, int y, int z,
+                               int stepX, int stepZ, int length) {
+        if (open && !clearOpen) return;
+        Material material = open ? Material.AIR : Material.BARRIER;
+        for (int offset = 0; offset < length; offset++) {
+            world.getBlockAt(x + offset * stepX, y, z + offset * stepZ).setType(material, false);
         }
     }
 
     public void enter(Player player, JarRecord jar) {
+        if (!jar.hasPortal()) return;
         ensureBuilt(jar);
         sessions.put(player.getUniqueId(), jar.id());
         CellLayout.Cell c = cell(jar);
-        double x = c.centerX(jar.scale()) + .5, z = c.centerZ(jar.scale()) + .5;
+        Location doorBlock = jar.doorBlockLocation();
+        int tileX = doorBlock.getBlockX() - jar.x(), tileZ = doorBlock.getBlockZ() - jar.z();
+        double x = c.minX() + tileX * jar.scale() + jar.scale() / 2.0;
+        double z = c.minZ() + tileZ * jar.scale() + jar.scale() / 2.0;
         int margin = 2;
-        if (jar.door() == BlockFace.NORTH) z = c.minZ() + margin + .5;
-        else if (jar.door() == BlockFace.SOUTH) z = c.minZ() + jar.scale() - margin - .5;
-        else if (jar.door() == BlockFace.WEST) x = c.minX() + margin + .5;
-        else if (jar.door() == BlockFace.EAST) x = c.minX() + jar.scale() - margin - .5;
+        if (jar.door() == BlockFace.NORTH) z = c.minZ() + tileZ * jar.scale() + margin + .5;
+        else if (jar.door() == BlockFace.SOUTH) z = c.minZ() + (tileZ + 1) * jar.scale() - margin - .5;
+        else if (jar.door() == BlockFace.WEST) x = c.minX() + tileX * jar.scale() + margin + .5;
+        else if (jar.door() == BlockFace.EAST) x = c.minX() + (tileX + 1) * jar.scale() - margin - .5;
         if (player.teleport(new Location(world, x, c.minY() + 1.1, z, player.getYaw(), player.getPitch()))) {
             applyEnvironment(player, jar);
         } else {
@@ -100,7 +177,7 @@ public final class InteriorService {
         JarRecord jar = syncSession(player, player.getLocation(), repository);
         if (jar == null) return ExitResult.NOT_INSIDE;
         if (isClogged(jar)) return ExitResult.CLOGGED;
-        Location destination = jar.outsideLocation().add(.5, .2, .5)
+        Location destination = jar.doorBlockLocation().add(.5, .2, .5)
                 .add(jar.door().getModX() * 1.5, 0, jar.door().getModZ() * 1.5);
         if (!player.teleport(destination)) return ExitResult.NOT_INSIDE;
         sessions.remove(player.getUniqueId());
@@ -109,9 +186,9 @@ public final class InteriorService {
     }
 
     public boolean isClogged(JarRecord jar) {
-        Location outside = jar.outsideLocation();
-        if (!jar.placed() || outside == null || outside.getBlock().getType() != Material.GLASS) return true;
-        return !outside.clone().add(jar.door().getModX(), 0, jar.door().getModZ()).getBlock().isPassable();
+        Location doorBlock = jar.doorBlockLocation();
+        if (!jar.placed() || doorBlock == null || doorBlock.getBlock().getType() != Material.GLASS) return true;
+        return !doorBlock.clone().add(jar.door().getModX(), 0, jar.door().getModZ()).getBlock().isPassable();
     }
 
     public List<Player> occupants(JarRecord jar) {
@@ -153,25 +230,29 @@ public final class InteriorService {
     }
 
     public void destroy(JarRecord jar) {
-        Location outside = jar.outsideLocation();
         for (UUID playerId : new ArrayList<>(sessions.keySet())) {
             if (!jar.id().equals(sessions.get(playerId))) continue;
             sessions.remove(playerId);
             Player player = Bukkit.getPlayer(playerId);
             if (player == null) continue;
-            Location destination = outside == null ? Bukkit.getWorlds().getFirst().getSpawnLocation()
-                    : outside.clone().add(.5, .2, .5)
+            Location doorBlock = jar.doorBlockLocation();
+            Location destination = doorBlock == null ? Bukkit.getWorlds().getFirst().getSpawnLocation()
+                    : doorBlock.clone().add(.5, .2, .5)
                     .add(jar.door().getModX() * 1.5, 0, jar.door().getModZ() * 1.5);
             player.teleport(destination);
             resetEnvironment(player);
         }
 
+        destroyCell(jar);
+    }
+
+    public void destroyCell(JarRecord jar) {
         CellLayout.Cell c = cell(jar);
-        int size = jar.scale();
+        int sizeX = jar.interiorSizeX(), sizeY = jar.scale(), sizeZ = jar.interiorSizeZ();
         BoundingBox bounds = new BoundingBox(c.minX(), c.minY(), c.minZ(),
-                c.minX() + size, c.minY() + size, c.minZ() + size);
+                c.minX() + sizeX, c.minY() + sizeY, c.minZ() + sizeZ);
         world.getNearbyEntities(bounds, entity -> !(entity instanceof Player)).forEach(org.bukkit.entity.Entity::remove);
-        plugin.getServer().getScheduler().runTask(plugin, new CellCleanup(c, size));
+        plugin.getServer().getScheduler().runTask(plugin, new CellCleanup(c, sizeX, sizeY, sizeZ));
     }
 
     public void pruneSessions(JarRepository repository) {
@@ -216,31 +297,46 @@ public final class InteriorService {
     public boolean isExitWall(Player player, Location block, JarRepository repository) {
         UUID id = sessions.get(player.getUniqueId());
         JarRecord jar = id == null ? null : repository.byId(id).orElse(null);
-        if (jar == null || !contains(jar, block)) return false;
-        CellLayout.Cell c = cell(jar); int s = jar.scale();
+        if (jar == null || !jar.hasPortal() || !contains(jar, block)) return false;
+        CellLayout.Cell c = cell(jar);
+        Location doorBlock = jar.doorBlockLocation();
+        int tileX = doorBlock.getBlockX() - jar.x(), tileZ = doorBlock.getBlockZ() - jar.z();
+        int minX = c.minX() + tileX * jar.scale(), minZ = c.minZ() + tileZ * jar.scale();
         return switch (jar.door()) {
-            case NORTH -> block.getBlockZ() == c.minZ();
-            case SOUTH -> block.getBlockZ() == c.minZ() + s - 1;
-            case WEST -> block.getBlockX() == c.minX();
-            case EAST -> block.getBlockX() == c.minX() + s - 1;
+            case NORTH -> block.getBlockZ() == minZ && block.getBlockX() >= minX
+                    && block.getBlockX() < minX + jar.scale();
+            case SOUTH -> block.getBlockZ() == minZ + jar.scale() - 1 && block.getBlockX() >= minX
+                    && block.getBlockX() < minX + jar.scale();
+            case WEST -> block.getBlockX() == minX && block.getBlockZ() >= minZ
+                    && block.getBlockZ() < minZ + jar.scale();
+            case EAST -> block.getBlockX() == minX + jar.scale() - 1 && block.getBlockZ() >= minZ
+                    && block.getBlockZ() < minZ + jar.scale();
             default -> false;
         };
     }
 
     public boolean contains(JarRecord jar, Location location) {
         if (location.getWorld() != world) return false;
-        CellLayout.Cell c = cell(jar); int s = jar.scale();
-        return location.getBlockX() >= c.minX() && location.getBlockX() < c.minX() + s
-                && location.getBlockY() >= c.minY() && location.getBlockY() < c.minY() + s
-                && location.getBlockZ() >= c.minZ() && location.getBlockZ() < c.minZ() + s;
+        CellLayout.Cell c = cell(jar);
+        int relativeX = location.getBlockX() - c.minX(), relativeZ = location.getBlockZ() - c.minZ();
+        if (relativeX < 0 || relativeZ < 0 || location.getBlockY() < c.minY()
+                || location.getBlockY() >= c.minY() + jar.scale()) return false;
+        return jar.assembly().contains(relativeX / jar.scale(), relativeZ / jar.scale());
     }
 
     public boolean isBoundary(JarRecord jar, Location location) {
         if (!contains(jar, location)) return false;
-        CellLayout.Cell c = cell(jar); int s = jar.scale();
-        int x = location.getBlockX(), y = location.getBlockY(), z = location.getBlockZ();
-        return x == c.minX() || x == c.minX() + s - 1 || z == c.minZ() || z == c.minZ() + s - 1
-                || y == c.minY() || y == c.minY() + s - 1;
+        CellLayout.Cell c = cell(jar);
+        int relativeX = location.getBlockX() - c.minX(), relativeZ = location.getBlockZ() - c.minZ();
+        int tileX = relativeX / jar.scale(), tileZ = relativeZ / jar.scale();
+        int localX = relativeX % jar.scale(), localZ = relativeZ % jar.scale();
+        int y = location.getBlockY() - c.minY();
+        JarAssembly assembly = jar.assembly();
+        return y == 0 || y == jar.scale() - 1
+                || localX == 0 && !assembly.contains(tileX - 1, tileZ)
+                || localX == jar.scale() - 1 && !assembly.contains(tileX + 1, tileZ)
+                || localZ == 0 && !assembly.contains(tileX, tileZ - 1)
+                || localZ == jar.scale() - 1 && !assembly.contains(tileX, tileZ + 1);
     }
 
     public enum ExitResult { EXITED, NOT_INSIDE, CLOGGED }
@@ -257,23 +353,27 @@ public final class InteriorService {
     private final class CellCleanup implements Runnable {
         private static final int BLOCKS_PER_TICK = 8192;
         private final CellLayout.Cell cell;
-        private final int size;
+        private final int sizeX;
+        private final int sizeY;
+        private final int sizeZ;
         private final int volume;
         private int index;
 
-        private CellCleanup(CellLayout.Cell cell, int size) {
+        private CellCleanup(CellLayout.Cell cell, int sizeX, int sizeY, int sizeZ) {
             this.cell = cell;
-            this.size = size;
-            this.volume = size * size * size;
+            this.sizeX = sizeX;
+            this.sizeY = sizeY;
+            this.sizeZ = sizeZ;
+            this.volume = sizeX * sizeY * sizeZ;
         }
 
         @Override
         public void run() {
             int end = Math.min(volume, index + BLOCKS_PER_TICK);
             while (index < end) {
-                int x = index % size;
-                int z = (index / size) % size;
-                int y = index / (size * size);
+                int x = index % sizeX;
+                int z = (index / sizeX) % sizeZ;
+                int y = index / (sizeX * sizeZ);
                 world.getBlockAt(cell.minX() + x, cell.minY() + y, cell.minZ() + z).setType(Material.AIR, false);
                 index++;
             }

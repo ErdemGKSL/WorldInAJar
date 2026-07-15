@@ -1,0 +1,73 @@
+package tr.erdemdev.worldInAJar;
+
+import org.junit.jupiter.api.Test;
+import org.bukkit.block.BlockFace;
+
+import java.util.List;
+import java.util.UUID;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class JarAssemblyTest {
+    @Test
+    void supportsNonRectangularPartsAndHoles() {
+        JarAssembly assembly = new JarAssembly(List.of(
+                new JarPart(0, 0, 2, 1),
+                new JarPart(0, 1, 1, 2),
+                new JarPart(2, 2, 1, 1)));
+
+        assertEquals(3, assembly.width());
+        assertEquals(3, assembly.depth());
+        assertEquals(5, assembly.tiles().size());
+        assertFalse(assembly.contains(1, 1));
+        assertTrue(assembly.contains(2, 2));
+    }
+
+    @Test
+    void rejectsOverlappingParts() {
+        assertThrows(IllegalArgumentException.class, () -> new JarAssembly(List.of(
+                new JarPart(0, 0, 2, 2), new JarPart(1, 1, 1, 1))));
+    }
+
+    @Test
+    void normalizationPreservesRelativeLayout() {
+        JarAssembly normalized = new JarAssembly(List.of(
+                new JarPart(-2, 4, 1, 1), new JarPart(1, 6, 2, 1))).normalized();
+
+        assertEquals(new JarPart(0, 0, 1, 1), normalized.parts().get(0));
+        assertEquals(new JarPart(3, 2, 2, 1), normalized.parts().get(1));
+        assertEquals(5, normalized.width());
+        assertEquals(3, normalized.depth());
+    }
+
+    @Test
+    void removingPartReturnsNormalizedRemainingAssembly() {
+        JarPart removed = new JarPart(0, 0, 1, 1);
+        JarAssembly assembly = new JarAssembly(List.of(
+                removed, new JarPart(2, 1, 1, 2), new JarPart(3, 2, 1, 1)));
+
+        JarAssembly remaining = assembly.without(removed);
+
+        assertNotNull(remaining);
+        assertEquals(List.of(new JarPart(0, 0, 1, 2), new JarPart(1, 1, 1, 1)), remaining.parts());
+    }
+
+    @Test
+    void defaultPortalTileIsExposedOnRequestedFace() {
+        JarAssembly assembly = new JarAssembly(List.of(
+                new JarPart(0, 0, 2, 1), new JarPart(0, 1, 1, 2)));
+
+        JarAssembly.Tile east = JarRecord.defaultPortalTile(assembly, BlockFace.EAST);
+
+        assertTrue(assembly.contains(east.x(), east.z()));
+        assertFalse(assembly.contains(east.x() + 1, east.z()));
+    }
+
+    @Test
+    void portalCannotBeStoredOnInternalFace() {
+        assertThrows(IllegalArgumentException.class, () -> new JarRecord(
+                UUID.randomUUID(), UUID.randomUUID(), "world", 0, 64, 0,
+                BlockFace.EAST, 0, 0, 0, 32,
+                List.of(new JarPart(0, 0, 2, 1)), true));
+    }
+}

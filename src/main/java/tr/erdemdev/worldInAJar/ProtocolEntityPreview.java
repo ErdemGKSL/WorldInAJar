@@ -165,11 +165,12 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
     private List<Entity> interiorEntities(JarRecord jar, int maximum) {
         if (maximum == 0) return List.of();
         CellLayout.Cell cell = interiors.cell(jar);
-        int size = jar.scale();
         BoundingBox bounds = new BoundingBox(cell.minX(), cell.minY(), cell.minZ(),
-                cell.minX() + size, cell.minY() + size, cell.minZ() + size);
+                cell.minX() + jar.interiorSizeX(), cell.minY() + jar.scale(),
+                cell.minZ() + jar.interiorSizeZ());
         List<Entity> result = new ArrayList<>();
-        for (Entity entity : interiors.world().getNearbyEntities(bounds, this::eligible)) {
+        for (Entity entity : interiors.world().getNearbyEntities(bounds,
+                entity -> eligible(entity) && interiors.contains(jar, entity.getLocation()))) {
             result.add(entity);
             if (result.size() >= maximum) break;
         }
@@ -179,7 +180,7 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
     private List<Entity> outsideEntities(JarRecord jar, int maximum) {
         if (maximum == 0) return List.of();
         int radius = bounded("preview.interior.outside-radius", 6, 1, 24);
-        Location center = jar.outsideLocation().clone().add(.5, .5, .5);
+        Location center = jar.outsideCenter();
         List<Entity> result = new ArrayList<>();
         for (Entity entity : center.getWorld().getNearbyEntities(center, radius, radius, radius, this::eligible)) {
             if (entity.getLocation().distanceSquared(center) > radius * radius) continue;

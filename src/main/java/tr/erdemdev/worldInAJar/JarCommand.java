@@ -38,7 +38,10 @@ public final class JarCommand implements CommandExecutor, TabCompleter {
                 plugin.repository().all().forEach(j -> sender.sendMessage("§e" + j.id() + " §7owner=" + j.owner()
                         + " state=" + (j.placed() ? "placed" : "item")
                         + " outside=" + j.world() + ":" + j.x() + "," + j.y() + "," + j.z()
-                        + " cell=" + j.cell() + " scale=" + j.scale()));
+                        + " cell=" + j.cell() + " scale=" + j.scale()
+                        + " footprint=" + j.width() + "x" + j.depth()
+                        + " parts=" + j.parts().size()
+                        + " portal=" + (j.hasPortal() ? j.doorX() + "," + j.doorZ() + "," + j.door() : "none")));
             }
             case "reload" -> {
                 if (!sender.hasPermission("worldinajar.reload")) return denied(sender);

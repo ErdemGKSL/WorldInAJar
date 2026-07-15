@@ -5,13 +5,16 @@ entity-preview: manequeen
 # Interior edge length in blocks. Existing jars retain the scale they were created with.
 jar:
   scale: 32
+  # Maximum exterior width or depth, in glass blocks, for attached jar assemblies.
+  # The effective limit is also constrained by interior.allocation-stride.
+  max-combined-size: 9
 
 interior:
   world: world_in_a_jar
   base-y: 64
   cell-gap: 24
   # Fixed allocation spacing prevents cells created under different scale settings overlapping.
-  # Keep this larger than the maximum allowed scale (256).
+  # Keep this at least jar.scale * jar.max-combined-size.
   allocation-stride: 320
   mob-spawning: true
 
