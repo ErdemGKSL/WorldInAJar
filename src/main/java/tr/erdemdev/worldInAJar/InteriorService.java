@@ -199,9 +199,12 @@ public final class InteriorService {
     }
 
     private void applyEnvironment(Player player, JarRecord jar) {
-        Location outside = jar.outsideLocation();
-        if (outside == null) return;
         player.setPlayerWeather(WeatherType.CLEAR);
+        Location outside = jar.outsideLocation();
+        if (outside == null) {
+            player.resetPlayerTime();
+            return;
+        }
         player.setPlayerTime(outside.getWorld().getFullTime() - world.getFullTime(), true);
     }
 
