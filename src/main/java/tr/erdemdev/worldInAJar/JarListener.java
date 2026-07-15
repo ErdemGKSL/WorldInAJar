@@ -156,6 +156,27 @@ public final class JarListener implements Listener {
         previews.transportBlock(event.getBlock().getLocation());
     }
 
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void onSneakInteract(PlayerInteractEvent event) {
+        if (event.getAction() != Action.RIGHT_CLICK_BLOCK || event.getHand() != EquipmentSlot.HAND) return;
+        if (!event.getPlayer().isSneaking()) return;
+        Block block = event.getClickedBlock();
+        if (block == null) return;
+        JarRecord jar = repository.at(block.getLocation()).orElse(null);
+        if (jar == null) return;
+        boolean clickedPortal = jar.hasPortal() && event.getBlockFace() == jar.door()
+                && block.equals(jar.doorBlockLocation().getBlock());
+        if (clickedPortal && empty(event.getItem())) {
+            event.setCancelled(true);
+            removePortal(event.getPlayer(), jar, block);
+            return;
+        }
+        if (horizontal(event.getBlockFace()) && items.isJar(event.getItem())) {
+            event.setCancelled(true);
+            attach(event.getPlayer(), jar, block, event.getBlockFace(), event.getItem());
+        }
+    }
+
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onInteract(PlayerInteractEvent event) {
         if (event.getAction() != Action.RIGHT_CLICK_BLOCK || event.getHand() != EquipmentSlot.HAND) return;
@@ -164,20 +185,9 @@ public final class JarListener implements Listener {
         JarRecord jar = repository.at(block.getLocation()).orElse(null);
         boolean clickedPortal = jar != null && jar.hasPortal() && event.getBlockFace() == jar.door()
                 && block.equals(jar.doorBlockLocation().getBlock());
-        if (clickedPortal && event.getPlayer().isSneaking() && empty(event.getItem())) {
-            event.setCancelled(true);
-            removePortal(event.getPlayer(), jar, block);
-            return;
-        }
         if (jar != null && horizontal(event.getBlockFace()) && items.isPortalSide(event.getItem())) {
             event.setCancelled(true);
             installPortal(event.getPlayer(), jar, block, event.getBlockFace());
-            return;
-        }
-        if (jar != null && event.getPlayer().isSneaking() && horizontal(event.getBlockFace())
-                && items.isJar(event.getItem())) {
-            event.setCancelled(true);
-            attach(event.getPlayer(), jar, block, event.getBlockFace(), event.getItem());
             return;
         }
         if (clickedPortal) {

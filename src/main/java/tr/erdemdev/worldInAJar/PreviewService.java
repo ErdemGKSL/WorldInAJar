@@ -309,7 +309,7 @@ public final class PreviewService {
                     ? bounded("preview.interior.max-blocks", 4096, 0, 16384) : 0;
             int radius = bounded("preview.interior.outside-radius", 6, 1, 24);
             List<OutsideSample> outside = sampleOutside(scene.jar, radius, outsideMaximum);
-            BlockData floor = referenceBlock(scene.jar).subtract(0, 1, 0).getBlock().getBlockData();
+            List<FloorSample> floor = sampleFloor(scene.jar);
             int interiorFingerprint = blockFingerprint(outside, floor, radius);
             if (scene.interiorFingerprint != interiorFingerprint) {
             List<VirtualBlockDisplay> stale = new ArrayList<>(scene.interiorBlocks);
@@ -345,6 +345,23 @@ public final class PreviewService {
             }
         }
         return result;
+    }
+
+    private List<FloorSample> sampleFloor(JarRecord jar) {
+        Location origin = jar.outsideLocation();
+        World world = origin.getWorld();
+        int floorY = origin.getBlockY() - 1;
+        List<FloorSample> result = new ArrayList<>();
+        for (JarAssembly.Tile tile : jar.assembly().tiles().stream()
+                .sorted(Comparator.comparingInt(JarAssembly.Tile::z)
+                        .thenComparingInt(JarAssembly.Tile::x)).toList()) {
+            BlockData blockData = floorY < world.getMinHeight() || floorY >= world.getMaxHeight()
+                    ? Material.AIR.createBlockData()
+                    : world.getBlockAt(origin.getBlockX() + tile.x(), floorY,
+                    origin.getBlockZ() + tile.z()).getBlockData();
+            result.add(new FloorSample(tile.x(), tile.z(), blockData));
+        }
+        return List.copyOf(result);
     }
 
     private List<OutsideSample> sampleOutside(JarRecord jar, int radius, int maximum) {
@@ -402,8 +419,12 @@ public final class PreviewService {
         return fingerprint;
     }
 
-    private static int blockFingerprint(List<OutsideSample> blocks, BlockData floor, int radius) {
-        int fingerprint = Objects.hash(floor.getAsString(), radius);
+    private static int blockFingerprint(List<OutsideSample> blocks, List<FloorSample> floor, int radius) {
+        int fingerprint = Objects.hash(radius);
+        for (FloorSample sample : floor) {
+            fingerprint = 31 * fingerprint + Objects.hash(
+                    sample.tileX, sample.tileZ, sample.blockData.getAsString());
+        }
         for (OutsideSample block : blocks) {
             fingerprint = 31 * fingerprint + Objects.hash(
                     block.dx, block.dy, block.dz, block.blockData.getAsString());
@@ -463,14 +484,6 @@ public final class PreviewService {
         return dx * jar.door().getModX() + dz * jar.door().getModZ() > PORTAL_SIDE_SWITCH_OFFSET;
     }
 
-    private static Location referenceBlock(JarRecord jar) {
-        Location origin = jar.outsideLocation();
-        JarAssembly.Tile tile = jar.assembly().tiles().stream()
-                .min(Comparator.comparingInt(JarAssembly.Tile::z).thenComparingInt(JarAssembly.Tile::x))
-                .orElseThrow();
-        return origin.add(tile.x(), 0, tile.z());
-    }
-
     private void spawnInteriorBlocks(JarScene scene, List<OutsideSample> samples) {
         // Inside the jar the player is 1/scale sized, so every outside block renders as a cell-sized
         // cube tiled around the cell exactly where the real block sits around the jar outside.
@@ -492,19 +505,19 @@ public final class PreviewService {
         }
     }
 
-    private void spawnInteriorFloor(JarScene scene, BlockData blockData) {
-        if (!renderable(blockData.getMaterial(), true)) return;
+    private void spawnInteriorFloor(JarScene scene, List<FloorSample> samples) {
         CellLayout.Cell cell = interiors.cell(scene.jar);
         int scale = scene.jar.scale();
         float sizeX = scene.jar.interiorSizeX(), sizeZ = scene.jar.interiorSizeZ();
         float halfX = sizeX / 2f, halfY = scale / 2f, halfZ = sizeZ / 2f;
         Location center = new Location(interiors.world(), cell.minX() + halfX,
                 cell.minY() + halfY, cell.minZ() + halfZ);
-        for (JarAssembly.Tile tile : scene.jar.assembly().tiles()) {
-            VirtualBlockDisplay display = new VirtualBlockDisplay(center, blockData,
+        for (FloorSample sample : samples) {
+            if (!renderable(sample.blockData.getMaterial(), true)) continue;
+            VirtualBlockDisplay display = new VirtualBlockDisplay(center, sample.blockData,
                     // Its top face is flush with the top of this part's barrier floor.
-                    new Matrix4f().translation(tile.x() * scale - halfX,
-                            1f - halfY - scale, tile.z() * scale - halfZ).scale(scale));
+                    new Matrix4f().translation(sample.tileX * scale - halfX,
+                            1f - halfY - scale, sample.tileZ * scale - halfZ).scale(scale));
             scene.interiorBlocks.add(display);
         }
     }
@@ -837,6 +850,7 @@ public final class PreviewService {
     }
 
     private record InteriorBox(int x, int y, int z, int sx, int sy, int sz, BlockData blockData) {}
+    private record FloorSample(int tileX, int tileZ, BlockData blockData) {}
     private record OutsideSample(int dx, int dy, int dz, BlockData blockData) {}
     private record OutsideOffset(int dx, int dy, int dz, int distanceSquared) {}
     private record OutsideArea(int radius, int width, int depth) {}
