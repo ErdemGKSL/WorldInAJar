@@ -402,7 +402,7 @@ public final class PreviewService {
         spawnSurface(scene, center, scene.jar.door() == org.bukkit.block.BlockFace.SOUTH ? portal : glass,
                 new Matrix4f().translation(-half, -half, half - 1).scale(scale, scale, 1));
         spawnSurface(scene, center, glass,
-                new Matrix4f().translation(-half, -half, -half).scale(scale, 1, scale));
+                new Matrix4f().translation(-half, -half + .025f, -half).scale(scale, 1, scale));
         spawnSurface(scene, center, glass,
                 new Matrix4f().translation(-half, half - 1, -half).scale(scale, 1, scale));
     }
