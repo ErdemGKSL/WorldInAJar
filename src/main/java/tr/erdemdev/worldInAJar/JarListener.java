@@ -1,5 +1,6 @@
 package tr.erdemdev.worldInAJar;
 
+import io.papermc.paper.event.entity.EntityMoveEvent;
 import io.papermc.paper.event.player.PlayerInventorySlotChangeEvent;
 import org.bukkit.Material;
 import org.bukkit.block.Block;
@@ -13,6 +14,7 @@ import org.bukkit.event.block.*;
 import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.entity.EntityRemoveEvent;
 import org.bukkit.event.entity.ItemMergeEvent;
+import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.player.PlayerChangedWorldEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
@@ -32,11 +34,12 @@ public final class JarListener implements Listener {
     private final JarItems items;
     private final InteriorService interiors;
     private final PreviewService previews;
+    private final PortalTransferService transfers;
 
     public JarListener(WorldInAJar plugin, JarRepository repository, JarItems items,
-                       InteriorService interiors, PreviewService previews) {
+                       InteriorService interiors, PreviewService previews, PortalTransferService transfers) {
         this.plugin = plugin; this.repository = repository; this.items = items;
-        this.interiors = interiors; this.previews = previews;
+        this.interiors = interiors; this.previews = previews; this.transfers = transfers;
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
@@ -159,6 +162,21 @@ public final class JarListener implements Listener {
         if (items.isJar(event.getEntity().getItemStack()) || items.isJar(event.getTarget().getItemStack())) {
             event.setCancelled(true);
         }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onEntityMove(EntityMoveEvent event) {
+        transfers.move(event.getEntity(), event.getFrom(), event.getTo());
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onInventoryClick(InventoryClickEvent event) {
+        UUID id = items.id(event.getCurrentItem());
+        if (id == null) return;
+        JarRecord jar = repository.byId(id).orElse(null);
+        if (!transfers.insertFromCursor(event.getCursor(), jar)) return;
+        event.setCancelled(true);
+        event.getView().setCursor(null);
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
