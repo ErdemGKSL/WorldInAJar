@@ -5,6 +5,7 @@ import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.ShapedRecipe;
+import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 
@@ -33,12 +34,16 @@ public final class JarItems {
     }
 
     public boolean isJar(ItemStack item) {
-        return item != null && item.getItemMeta().getPersistentDataContainer().has(itemKey, PersistentDataType.BYTE);
+        if (item == null || !item.hasItemMeta()) return false;
+        ItemMeta meta = item.getItemMeta();
+        return meta != null && meta.getPersistentDataContainer().has(itemKey, PersistentDataType.BYTE);
     }
 
     public UUID id(ItemStack item) {
-        if (!isJar(item)) return null;
-        String value = item.getItemMeta().getPersistentDataContainer().get(idKey, PersistentDataType.STRING);
+        if (item == null || !item.hasItemMeta()) return null;
+        ItemMeta meta = item.getItemMeta();
+        if (meta == null || !meta.getPersistentDataContainer().has(itemKey, PersistentDataType.BYTE)) return null;
+        String value = meta.getPersistentDataContainer().get(idKey, PersistentDataType.STRING);
         try { return value == null ? null : UUID.fromString(value); } catch (IllegalArgumentException ignored) { return null; }
     }
 

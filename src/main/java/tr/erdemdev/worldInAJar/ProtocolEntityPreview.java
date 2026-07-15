@@ -11,6 +11,7 @@ import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.game.ClientGamePacketListener;
 import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket;
+import net.minecraft.network.protocol.game.ClientboundRotateHeadPacket;
 import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket;
 import net.minecraft.network.protocol.game.ClientboundSetEntityMotionPacket;
 import net.minecraft.network.protocol.game.ClientboundSetEquipmentPacket;
@@ -18,6 +19,7 @@ import net.minecraft.network.protocol.game.ClientboundSetPlayerTeamPacket;
 import net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundUpdateAttributesPacket;
 import net.minecraft.server.level.ChunkMap;
+import net.minecraft.util.Mth;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.PositionMoveRotation;
@@ -67,17 +69,19 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
         this.eventPipe = new PacketAdapter(plugin, List.of(PacketType.Play.Server.ANIMATION,
                 PacketType.Play.Server.ENTITY_STATUS, PacketType.Play.Server.HURT_ANIMATION,
                 PacketType.Play.Server.ENTITY_EFFECT, PacketType.Play.Server.REMOVE_ENTITY_EFFECT,
-                PacketType.Play.Server.ENTITY_EQUIPMENT, PacketType.Play.Server.ENTITY_METADATA)) {
+                PacketType.Play.Server.ENTITY_EQUIPMENT, PacketType.Play.Server.ENTITY_METADATA,
+                PacketType.Play.Server.ENTITY_HEAD_ROTATION)) {
             @Override
             public void onPacketSending(PacketEvent event) {
                 Integer sourceId = event.getPacket().getIntegers().readSafely(0);
                 if (sourceId == null) return;
+                UUID sourceWorldId = event.getPlayer().getWorld().getUID();
                 int token = System.identityHashCode(event.getPacket().getHandle());
                 if (!forwardedHandles.add(token)) return;
                 PacketContainer packet = event.getPacket().deepClone();
                 plugin.getServer().getScheduler().runTask(plugin, () -> {
                     forwardedHandles.remove(token);
-                    relay(sourceId, packet);
+                    relay(sourceWorldId, sourceId, packet);
                 });
             }
         };
@@ -129,7 +133,8 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
         int radius = bounded("preview.interior.outside-radius", 6, 1, 24);
         Location center = jar.outsideLocation().clone().add(.5, .5, .5);
         List<Entity> result = new ArrayList<>();
-        for (Entity entity : center.getWorld().getNearbyEntities(center, radius, radius, radius, this::eligible)) {
+        for (Entity entity : center.getWorld().getNearbyEntities(center, radius, radius, radius,
+                candidate -> eligible(candidate) && !(candidate instanceof org.bukkit.entity.Item))) {
             if (entity.getLocation().distanceSquared(center) > radius * radius) continue;
             result.add(entity);
             if (result.size() >= maximum) break;
@@ -186,9 +191,9 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
         if (mirror != null) mirror.destroyAll();
     }
 
-    private void relay(int sourceId, PacketContainer sourcePacket) {
+    private void relay(UUID sourceWorldId, int sourceId, PacketContainer sourcePacket) {
         for (Mirror mirror : mirrors.values()) {
-            if (mirror.sourceEntityId != sourceId) continue;
+            if (!mirror.matchesSource(sourceWorldId, sourceId)) continue;
             PacketContainer packet = sourcePacket.deepClone();
             packet.getIntegers().writeSafely(0, mirror.id);
             for (UUID viewerId : mirror.viewers) {
@@ -224,6 +229,7 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
         private final Set<UUID> viewers = new HashSet<>();
         private VirtualNametag nametag;
         private int sourceEntityId;
+        private UUID sourceWorldId;
 
         private Mirror(Entity source) {
             this.uuid = source instanceof Player ? source.getUniqueId() : UUID.randomUUID();
@@ -231,10 +237,12 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
             this.playerName = source instanceof Player player ? player.getName() : null;
             this.hiddenNameTeam = playerName == null ? null : hiddenNameTeam(playerName);
             this.sourceEntityId = source.getEntityId();
+            this.sourceWorldId = source.getWorld().getUID();
         }
 
         private void update(Entity source, Location location, double scale, Collection<Player> desired) {
             sourceEntityId = source.getEntityId();
+            sourceWorldId = source.getWorld().getUID();
             double renderScale = renderScale(source, scale);
             Location labelLocation = null;
             if (playerName != null) {
@@ -274,10 +282,17 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
                 send(viewer, ClientboundSetPlayerTeamPacket.createAddOrModifyPacket(hiddenNameTeam, true));
             }
             send(viewer, new ClientboundAddEntityPacket(id, uuid, location.getX(), location.getY(), location.getZ(),
-                    location.getPitch(), location.getYaw(), handle.getType(), original.getData(), Vec3.ZERO,
-                    location.getYaw()));
+                    handle.getXRot(), handle.getYRot(), handle.getType(), original.getData(), Vec3.ZERO,
+                    handle.getYHeadRot()));
             if (nametag != null) nametag.spawn(viewer);
             return true;
+        }
+
+        private boolean matchesSource(UUID worldId, int entityId) {
+            if (sourceEntityId != entityId || !sourceWorldId.equals(worldId)) return false;
+            Entity current = Bukkit.getEntity(sourceUuid);
+            return current != null && current.isValid() && current.getEntityId() == entityId
+                    && current.getWorld().getUID().equals(worldId);
         }
 
         private void syncState(Player viewer, Entity source, Location location, double scale, double renderScale) {
@@ -285,7 +300,11 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
             send(viewer, new ClientboundSetEntityDataPacket(id, handle.getEntityData().packAll()));
             send(viewer, ClientboundTeleportEntityPacket.teleport(id,
                     new PositionMoveRotation(new Vec3(location.getX(), location.getY(), location.getZ()),
-                            handle.getDeltaMovement(), location.getYaw(), location.getPitch()), Set.<Relative>of(), false));
+                            handle.getDeltaMovement(), handle.getYRot(), handle.getXRot()), Set.<Relative>of(), false));
+            PacketContainer headRotation = PacketContainer.fromPacket(
+                    new ClientboundRotateHeadPacket(handle, Mth.packDegrees(handle.getYHeadRot())));
+            headRotation.getIntegers().write(0, id);
+            protocol.sendServerPacket(viewer, headRotation, false);
             send(viewer, new ClientboundSetEntityMotionPacket(id, handle.getDeltaMovement().scale(scale)));
             if (handle instanceof LivingEntity living) {
                 Collection<AttributeInstance> attributes = living.getAttributes().getSyncableAttributes();
