@@ -65,7 +65,7 @@ public final class JarListener implements Listener {
         event.getPlayer().sendMessage("§aJar placed. Right-click the side facing you to enter.");
     }
 
-    @EventHandler(priority = EventPriority.MONITOR)
+    @EventHandler(priority = EventPriority.LOWEST)
     public void onBreak(BlockBreakEvent event) {
         if (event.isCancelled()) return;
         JarRecord jar = repository.at(event.getBlock().getLocation()).orElse(null);
@@ -79,10 +79,15 @@ public final class JarListener implements Listener {
             return;
         }
         event.setDropItems(false);
-        JarRecord carried = jar.pickedUp();
-        repository.put(carried);
-        previews.seal(carried);
-        event.getBlock().getWorld().dropItemNaturally(event.getBlock().getLocation(), items.create(jar.id()));
+        plugin.getServer().getScheduler().runTask(plugin, () -> {
+            if (event.isCancelled()) return;
+            JarRecord current = repository.byId(jar.id()).orElse(null);
+            if (current == null || !current.placed() || !current.isAt(event.getBlock().getLocation())) return;
+            JarRecord carried = current.pickedUp();
+            repository.put(carried);
+            previews.seal(carried);
+            event.getBlock().getWorld().dropItemNaturally(event.getBlock().getLocation(), items.create(current.id()));
+        });
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
