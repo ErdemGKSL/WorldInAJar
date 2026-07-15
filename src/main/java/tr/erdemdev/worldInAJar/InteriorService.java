@@ -33,6 +33,7 @@ public final class InteriorService {
     private final Deque<WorldJob> worldJobs = new ArrayDeque<>();
     private final Deque<Runnable> pendingOperations = new ArrayDeque<>();
     private final Set<Integer> processingCells = new HashSet<>();
+    private final Set<Integer> readyCells = new HashSet<>();
     private final Map<Integer, List<Runnable>> readinessWaiters = new java.util.HashMap<>();
     private final Map<Long, Integer> retainedChunkCounts = new java.util.HashMap<>();
     private final Map<Long, Chunk> retainedChunks = new java.util.HashMap<>();
@@ -74,21 +75,31 @@ public final class InteriorService {
     public void copyRegionsAsync(JarRecord target, List<InteriorCopy> copies, Runnable completion) {
         beginProcessing(target);
         List<InteriorCopy> copySnapshot = List.copyOf(copies);
-        List<JarRecord> required = new ArrayList<>(copySnapshot.size() + 1);
+        scheduleCopy(target, copySnapshot, completion, 0);
+    }
+
+    private void scheduleCopy(JarRecord target, List<InteriorCopy> copies,
+                              Runnable completion, int attempt) {
+        List<JarRecord> required = new ArrayList<>(copies.size() + 1);
         required.add(target);
-        copySnapshot.forEach(copy -> required.add(copy.source()));
+        copies.forEach(copy -> required.add(copy.source()));
+        Runnable retry = () -> retryLater(
+                () -> scheduleCopy(target, copies, completion, attempt + 1), target, attempt);
         enqueueOperation(() -> withLoadedChunks(required, chunks -> {
             Deque<WorldJob> stages = new ArrayDeque<>();
             addBoundaryPreparation(stages, target);
             CellLayout.Cell destinationCell = cell(target);
-            for (InteriorCopy copy : copySnapshot) {
+            for (InteriorCopy copy : copies) {
                 addBoundaryPreparation(stages, copy.source());
                 stages.addLast(new RegionCopyJob(copy, target, destinationCell));
             }
-            submit(new SequenceJob(stages, () -> finishProcessing(target, completion), () -> {
+            submit(new SequenceJob(stages, () -> finishProcessing(target, completion), retry, () -> {
                 releaseChunks(chunks);
                 finishOperation();
             }));
+        }, () -> {
+            retry.run();
+            finishOperation();
         }));
     }
 
@@ -98,6 +109,12 @@ public final class InteriorService {
             return;
         }
         beginProcessing(jar);
+        scheduleEnsureBuilt(jar, completion, 0);
+    }
+
+    private void scheduleEnsureBuilt(JarRecord jar, Runnable completion, int attempt) {
+        Runnable retry = () -> retryLater(
+                () -> scheduleEnsureBuilt(jar, completion, attempt + 1), jar, attempt);
         enqueueOperation(() -> withLoadedChunks(List.of(jar), chunks -> {
             Deque<WorldJob> stages = new ArrayDeque<>();
             addBoundaryPreparation(stages, jar);
@@ -107,11 +124,23 @@ public final class InteriorService {
                 finishOperation();
                 return;
             }
-            submit(new SequenceJob(stages, () -> finishProcessing(jar, completion), () -> {
+            submit(new SequenceJob(stages, () -> finishProcessing(jar, completion), retry, () -> {
                 releaseChunks(chunks);
                 finishOperation();
             }));
+        }, () -> {
+            retry.run();
+            finishOperation();
         }));
+    }
+
+    private void retryLater(Runnable retry, JarRecord jar, int attempt) {
+        long delay = Math.min(100L, 1L << Math.min(attempt, 6));
+        if (attempt == 0 || attempt % 5 == 4) {
+            plugin.getLogger().warning("Retrying interior cell " + jar.cell()
+                    + " after a background processing failure (attempt " + (attempt + 2) + ").");
+        }
+        plugin.getServer().getScheduler().runTaskLater(plugin, retry, delay);
     }
 
     public record InteriorCopy(JarRecord source, int offsetX, int offsetY, int offsetZ,
@@ -131,9 +160,13 @@ public final class InteriorService {
 
     public boolean ensureBuilt(JarRecord jar) {
         if (!isReady(jar)) return false;
+        if (readyCells.contains(jar.cell())) return true;
         CellLayout.Cell c = cell(jar);
         if (world.isChunkLoaded(c.minX() >> 4, c.minZ() >> 4)
-                && isBuilt(jar) && isBoundaryCurrent(jar)) return true;
+                && isBuilt(jar) && isBoundaryCurrent(jar)) {
+            readyCells.add(jar.cell());
+            return true;
+        }
         ensureBuiltAsync(jar, () -> {});
         return false;
     }
@@ -143,6 +176,7 @@ public final class InteriorService {
     }
 
     private void beginProcessing(JarRecord jar) {
+        readyCells.remove(jar.cell());
         if (!processingCells.add(jar.cell())) {
             throw new IllegalStateException("Interior cell is already being processed: " + jar.cell());
         }
@@ -150,6 +184,7 @@ public final class InteriorService {
 
     private void finishProcessing(JarRecord jar, Runnable completion) {
         processingCells.remove(jar.cell());
+        readyCells.add(jar.cell());
         try { completion.run(); }
         finally {
             List<Runnable> waiters = readinessWaiters.remove(jar.cell());
@@ -276,11 +311,11 @@ public final class InteriorService {
             world.getNearbyEntities(bounds, entity -> !(entity instanceof Player))
                     .forEach(org.bukkit.entity.Entity::remove);
             submit(new SequenceJob(new ArrayDeque<>(List.of(new CellCleanup(jar))),
-                    () -> {}, () -> {
+                    () -> readyCells.remove(jar.cell()), () -> {
                 releaseChunks(chunks);
                 finishOperation();
             }));
-        }));
+        }, this::finishOperation));
     }
 
     public void pruneSessions(JarRepository repository) {
@@ -309,6 +344,7 @@ public final class InteriorService {
         retainedChunks.clear();
         retainedChunkCounts.clear();
         processingCells.clear();
+        readyCells.clear();
         readinessWaiters.clear();
         for (UUID playerId : new ArrayList<>(sessions.keySet())) {
             Player player = Bukkit.getPlayer(playerId);
@@ -403,7 +439,8 @@ public final class InteriorService {
         startNextOperation();
     }
 
-    private void withLoadedChunks(Collection<JarRecord> jars, Consumer<List<Chunk>> action) {
+    private void withLoadedChunks(Collection<JarRecord> jars, Consumer<List<Chunk>> action,
+                                  Runnable failure) {
         Set<ChunkCoordinate> coordinates = new HashSet<>();
         for (JarRecord jar : jars) coordinates.addAll(interiorChunks(jar));
         List<CompletableFuture<Chunk>> loads = coordinates.stream()
@@ -418,11 +455,17 @@ public final class InteriorService {
             List<Chunk> loaded = loads.stream().map(CompletableFuture::join)
                     .filter(java.util.Objects::nonNull).toList();
             Runnable completion = () -> {
+                if (loaded.size() != coordinates.size()) {
+                    failure.run();
+                    return;
+                }
                 retainChunks(loaded);
                 try { action.accept(loaded); }
                 catch (RuntimeException exception) {
                     releaseChunks(loaded);
-                    throw exception;
+                    plugin.getLogger().warning("Could not prepare an interior operation: "
+                            + exception.getMessage());
+                    failure.run();
                 }
             };
             if (Bukkit.isPrimaryThread()) completion.run();
