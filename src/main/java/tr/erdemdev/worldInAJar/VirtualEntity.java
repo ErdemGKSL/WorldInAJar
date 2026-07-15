@@ -132,9 +132,36 @@ final class VirtualBlockDisplay extends VirtualEntity {
     }
 }
 
+final class VirtualNametag extends VirtualEntity {
+    private final Display.TextDisplay display;
+
+    VirtualNametag(Location location, String name, float scale) {
+        this(new Display.TextDisplay(EntityType.TEXT_DISPLAY,
+                ((CraftWorld) location.getWorld()).getHandle()), location, name, scale);
+    }
+
+    private VirtualNametag(Display.TextDisplay display, Location location, String name, float scale) {
+        super(display, location);
+        this.display = display;
+        display.setText(net.minecraft.network.chat.Component.literal(name));
+        display.setTransformation(new Transformation(new Matrix4f().scale(scale)));
+        display.setBillboardConstraints(Display.BillboardConstraints.CENTER);
+        display.setShadowRadius(0f);
+        display.setViewRange(128f);
+        display.setNoGravity(true);
+        display.setInvulnerable(true);
+    }
+
+    void update(Location location, Collection<Player> viewers) {
+        positionSync(viewers, location, 0f, Vec3.ZERO, false);
+    }
+}
+
 final class VirtualMannequin extends VirtualEntity {
     private final Mannequin mannequin;
+    private final VirtualNametag nametag;
     private final float movementScale;
+    private final float renderScale;
     private List<SynchedEntityData.DataValue<?>> sharedMetadata = List.of();
     private int equipmentFingerprint;
     private boolean swinging;
@@ -150,15 +177,15 @@ final class VirtualMannequin extends VirtualEntity {
         super(mannequin, location);
         this.mannequin = mannequin;
         this.movementScale = scale;
+        this.renderScale = Math.max(.0625f, Math.min(16f, scale));
         mannequin.setProfile(ResolvableProfile.createResolved(((CraftPlayer) target).getHandle().getGameProfile()));
         mannequin.setImmovable(true);
         mannequin.setNoGravity(true);
         mannequin.setInvulnerable(true);
-        mannequin.setCustomName(net.minecraft.network.chat.Component.literal(target.getName()));
-        mannequin.setCustomNameVisible(true);
         AttributeInstance size = mannequin.getAttribute(Attributes.SCALE);
-        if (size != null) size.setBaseValue(Math.max(.0625, Math.min(16.0, scale)));
+        if (size != null) size.setBaseValue(renderScale);
         updateState(target);
+        this.nametag = new VirtualNametag(nametagLocation(location), target.getName(), renderScale);
     }
 
     void update(Player target, Location location, Collection<Player> viewers) {
@@ -174,6 +201,7 @@ final class VirtualMannequin extends VirtualEntity {
         location.setPitch(source.getXRot());
         positionSync(viewers, location, source.getYHeadRot(),
                 source.getDeltaMovement().scale(movementScale), source.onGround());
+        nametag.update(nametagLocation(location), viewers);
         if (!sharedMetadata.equals(oldSharedMetadata)) {
             sendTo(viewers, new ClientboundSetEntityDataPacket(id(), sharedMetadata));
         }
@@ -198,6 +226,17 @@ final class VirtualMannequin extends VirtualEntity {
         Collection<AttributeInstance> attributes = mannequin.getAttributes().getSyncableAttributes();
         if (!attributes.isEmpty()) send(viewer, new ClientboundUpdateAttributesPacket(id(), attributes));
         send(viewer, equipmentPacket());
+        nametag.spawn(viewer);
+    }
+
+    @Override
+    void destroy(Player viewer) {
+        super.destroy(viewer);
+        nametag.destroy(viewer);
+    }
+
+    private Location nametagLocation(Location feet) {
+        return feet.clone().add(0, mannequin.getBbHeight() + .3f * renderScale, 0);
     }
 
     private void updateState(Player target) {

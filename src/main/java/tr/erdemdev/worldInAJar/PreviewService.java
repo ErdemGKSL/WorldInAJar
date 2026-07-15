@@ -10,6 +10,10 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.joml.Matrix4f;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Predicate;
 
 /** Maintains viewer-specific, bidirectional display-only views for every placed jar. */
@@ -17,11 +21,22 @@ public final class PreviewService {
     private static final float FRONT_PORTAL_INWARD = .2f;
     private static final float BACK_PORTAL_INWARD = -.1f;
     private static final double PORTAL_SIDE_SWITCH_OFFSET = .1;
+    private static final int EXTERIOR_BLOCKS = 1;
+    private static final int INTERIOR_BLOCKS = 2;
     private final JavaPlugin plugin;
     private final InteriorService interiors;
     private final NamespacedKey displayKey;
     private final Map<UUID, JarScene> scenes = new HashMap<>();
     private final Map<Integer, List<OutsideOffset>> outsideOffsets = new HashMap<>();
+    private final Set<BlockRequest> pendingBlocks = ConcurrentHashMap.newKeySet();
+    private final Set<UUID> pendingPlayers = ConcurrentHashMap.newKeySet();
+    private final Map<UUID, Integer> routedBlocks = new ConcurrentHashMap<>();
+    private final Set<UUID> routedPlayers = ConcurrentHashMap.newKeySet();
+    private final AtomicBoolean routeScheduled = new AtomicBoolean();
+    private final AtomicBoolean applyScheduled = new AtomicBoolean();
+    private volatile List<JarRoute> routes = List.of();
+    private volatile boolean running;
+    private ExecutorService router;
     private JarRepository repository;
     private int taskId = -1;
     private long ticks;
@@ -35,14 +50,26 @@ public final class PreviewService {
     public void start(JarRepository repository) {
         stop();
         this.repository = repository;
+        running = true;
+        router = Executors.newSingleThreadExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "WorldInAJar-preview-router");
+            thread.setDaemon(true);
+            return thread;
+        });
+        rebuildRoutes();
         removeOrphans();
         long period = Math.max(1L, plugin.getConfig().getLong("preview.update-ticks", 5L));
         taskId = plugin.getServer().getScheduler().scheduleSyncRepeatingTask(plugin, this::tick, 1L, period);
     }
 
     public void stop() {
+        running = false;
         if (taskId != -1) plugin.getServer().getScheduler().cancelTask(taskId);
         taskId = -1;
+        if (router != null) router.shutdownNow();
+        router = null;
+        pendingBlocks.clear(); pendingPlayers.clear(); routedBlocks.clear(); routedPlayers.clear();
+        routeScheduled.set(false); applyScheduled.set(false); routes = List.of();
         for (JarScene scene : scenes.values()) scene.removeAll();
         scenes.clear();
         ticks = 0;
@@ -50,7 +77,25 @@ public final class PreviewService {
 
     public void invalidate(JarRecord jar) {
         JarScene scene = scenes.get(jar.id());
-        if (scene != null) scene.invalid = true;
+        if (scene != null) {
+            scene.exteriorInvalid = true;
+            scene.interiorInvalid = true;
+        }
+    }
+
+    /** Publishes a block change without retaining any Bukkit object past the event callback. */
+    public void transportBlock(Location location) {
+        if (!running || location.getWorld() == null) return;
+        pendingBlocks.add(new BlockRequest(location.getWorld().getUID(), location.getBlockX(),
+                location.getBlockY(), location.getBlockZ()));
+        scheduleRoute();
+    }
+
+    /** Coalesces high-frequency movement/state events before touching preview scenes. */
+    public void transportPlayer(Player player) {
+        if (!running) return;
+        pendingPlayers.add(player.getUniqueId());
+        scheduleRoute();
     }
 
     public void refresh(JarRecord jar) {
@@ -65,11 +110,13 @@ public final class PreviewService {
             scenes.put(jar.id(), scene);
         }
         refreshBlocks(scene, true, true);
+        rebuildRoutes();
     }
 
     public void remove(UUID id) {
         JarScene scene = scenes.remove(id);
         if (scene != null) scene.removeAll();
+        if (repository != null) rebuildRoutes();
     }
 
     public void seal(JarRecord jar) {
@@ -79,6 +126,7 @@ public final class PreviewService {
         scenes.put(jar.id(), scene);
         spawnSealedSurfaces(scene);
         updateSealedViewers(scene);
+        rebuildRoutes();
     }
 
     public void forget(Player player) {
@@ -95,6 +143,7 @@ public final class PreviewService {
     private void tick() {
         ticks++;
         interiors.pruneSessions(repository);
+        rebuildRoutes();
         Set<UUID> valid = new HashSet<>();
         for (JarRecord jar : repository.all()) {
             valid.add(jar.id());
@@ -125,7 +174,11 @@ public final class PreviewService {
             }
             updateViewers(scene);
             int blockPeriod = Math.max(1, plugin.getConfig().getInt("preview.block-refresh-ticks", 100));
-            if (scene.invalid || ticks % blockPeriod == 0) refreshBlocks(scene, false, false);
+            boolean reconcileBlocks = ticks % blockPeriod == 0;
+            if (scene.exteriorInvalid || scene.interiorInvalid || reconcileBlocks) {
+                refreshBlocks(scene, scene.exteriorInvalid || reconcileBlocks,
+                        scene.interiorInvalid || reconcileBlocks);
+            }
             updateOccupants(scene);
             updateOutsidePlayers(scene);
         }
@@ -204,13 +257,12 @@ public final class PreviewService {
     }
 
     private void refreshBlocks(JarScene scene, boolean forceExterior, boolean forceInterior) {
-        scene.invalid = false;
-
-        int exteriorMaximum = plugin.getConfig().getBoolean("preview.exterior.enabled", true)
-                ? bounded("preview.exterior.max-blocks", 2048, 0, 4096) : 0;
-        List<InteriorBox> interior = sampleInterior(scene.jar, exteriorMaximum);
-        int exteriorFingerprint = Objects.hash(interior);
-        if (forceExterior || scene.exteriorFingerprint != exteriorFingerprint) {
+        if (forceExterior) {
+            int exteriorMaximum = plugin.getConfig().getBoolean("preview.exterior.enabled", true)
+                    ? bounded("preview.exterior.max-blocks", 2048, 0, 4096) : 0;
+            List<InteriorBox> interior = sampleInterior(scene.jar, exteriorMaximum);
+            int exteriorFingerprint = Objects.hash(interior);
+            if (scene.exteriorFingerprint != exteriorFingerprint) {
             if (interior.size() >= exteriorMaximum && exteriorMaximum > 0 && scene.exteriorFingerprint != exteriorFingerprint)
                 plugin.getLogger().warning("Jar " + scene.jar.id() + " has more visible blocks than preview.exterior.max-blocks ("
                         + exteriorMaximum + "); the miniature is truncated.");
@@ -225,15 +277,18 @@ public final class PreviewService {
             removeEntities(stale, scene.exteriorViewers);
             if (stalePortal != null) for (Player viewer : online(scene.exteriorViewers)) stalePortal.destroy(viewer);
             scene.exteriorFingerprint = exteriorFingerprint;
+            }
+            scene.exteriorInvalid = false;
         }
 
-        int outsideMaximum = plugin.getConfig().getBoolean("preview.interior.enabled", true)
-                ? bounded("preview.interior.max-blocks", 4096, 0, 16384) : 0;
-        int radius = bounded("preview.interior.outside-radius", 6, 1, 24);
-        List<OutsideSample> outside = sampleOutside(scene.jar, radius, outsideMaximum);
-        BlockData floor = scene.jar.outsideLocation().clone().subtract(0, 1, 0).getBlock().getBlockData();
-        int interiorFingerprint = Objects.hash(outside, floor.getAsString(), radius);
-        if (forceInterior || scene.interiorFingerprint != interiorFingerprint) {
+        if (forceInterior) {
+            int outsideMaximum = plugin.getConfig().getBoolean("preview.interior.enabled", true)
+                    ? bounded("preview.interior.max-blocks", 4096, 0, 16384) : 0;
+            int radius = bounded("preview.interior.outside-radius", 6, 1, 24);
+            List<OutsideSample> outside = sampleOutside(scene.jar, radius, outsideMaximum);
+            BlockData floor = scene.jar.outsideLocation().clone().subtract(0, 1, 0).getBlock().getBlockData();
+            int interiorFingerprint = Objects.hash(outside, floor.getAsString(), radius);
+            if (scene.interiorFingerprint != interiorFingerprint) {
             List<VirtualBlockDisplay> stale = new ArrayList<>(scene.interiorBlocks);
             scene.interiorBlocks.clear();
             spawnInteriorFloor(scene, floor);
@@ -242,6 +297,8 @@ public final class PreviewService {
             showTo(scene.interiorViewers, scene.interiorBlocks);
             removeEntities(stale, scene.interiorViewers);
             scene.interiorFingerprint = interiorFingerprint;
+            }
+            scene.interiorInvalid = false;
         }
     }
 
