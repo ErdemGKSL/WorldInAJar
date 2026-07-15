@@ -817,9 +817,17 @@ public final class PreviewService {
     }
 
     private static boolean onDoorSide(JarRecord jar, Location viewer) {
-        Location center = jar.outsideCenter();
-        double dx = viewer.getX() - center.getX(), dz = viewer.getZ() - center.getZ();
-        return dx * jar.door().getModX() + dz * jar.door().getModZ() > PORTAL_SIDE_SWITCH_OFFSET;
+        return onPortalSide(viewer, jar.x() + jar.doorX(), jar.z() + jar.doorZ(), jar.door());
+    }
+
+    static boolean onPortalSide(Location viewer, int portalX, int portalZ,
+                                org.bukkit.block.BlockFace portalFace) {
+        double planeX = portalX + (portalFace == org.bukkit.block.BlockFace.EAST ? 1.0
+                : portalFace == org.bukkit.block.BlockFace.WEST ? 0.0 : .5);
+        double planeZ = portalZ + (portalFace == org.bukkit.block.BlockFace.SOUTH ? 1.0
+                : portalFace == org.bukkit.block.BlockFace.NORTH ? 0.0 : .5);
+        double dx = viewer.getX() - planeX, dz = viewer.getZ() - planeZ;
+        return dx * portalFace.getModX() + dz * portalFace.getModZ() > PORTAL_SIDE_SWITCH_OFFSET;
     }
 
     private void spawnInteriorBlocks(JarScene scene, List<OutsideSample> samples) {

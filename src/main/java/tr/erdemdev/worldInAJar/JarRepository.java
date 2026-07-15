@@ -9,6 +9,10 @@ import org.bukkit.plugin.java.JavaPlugin;
 import java.io.File;
 import java.io.IOException;
 import java.util.*;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
 
 public final class JarRepository {
     private final JavaPlugin plugin;
@@ -17,6 +21,8 @@ public final class JarRepository {
     private final Map<UUID, JarRecord> portalRecords = new HashMap<>();
     private final Collection<JarRecord> recordsView = Collections.unmodifiableCollection(records.values());
     private final Collection<JarRecord> portalRecordsView = Collections.unmodifiableCollection(portalRecords.values());
+    private final ExecutorService saver = Executors.newSingleThreadExecutor(runnable ->
+            Thread.ofPlatform().daemon().name("world-in-a-jar-save").unstarted(runnable));
     private int nextCell;
 
     public JarRepository(JavaPlugin plugin) {
@@ -25,6 +31,7 @@ public final class JarRepository {
     }
 
     public void load() {
+        flushAsyncSaves();
         records.clear();
         portalRecords.clear();
         YamlConfiguration yaml = YamlConfiguration.loadConfiguration(file);
@@ -64,9 +71,44 @@ public final class JarRepository {
     }
 
     public void save() {
+        write(snapshot());
+    }
+
+    public void close() {
+        saver.shutdown();
+        try {
+            if (!saver.awaitTermination(5, TimeUnit.SECONDS)) saver.shutdownNow();
+        } catch (InterruptedException exception) {
+            saver.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+        save();
+    }
+
+    private void saveAsync() {
+        RepositorySnapshot snapshot = snapshot();
+        saver.execute(() -> write(snapshot));
+    }
+
+    private void flushAsyncSaves() {
+        try {
+            saver.submit(() -> {}).get();
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while waiting for jar data to save", exception);
+        } catch (ExecutionException exception) {
+            throw new IllegalStateException("Could not finish saving jar data", exception.getCause());
+        }
+    }
+
+    private RepositorySnapshot snapshot() {
+        return new RepositorySnapshot(nextCell, List.copyOf(records.values()));
+    }
+
+    private void write(RepositorySnapshot snapshot) {
         YamlConfiguration yaml = new YamlConfiguration();
-        yaml.set("next-cell", nextCell);
-        for (JarRecord record : records.values()) {
+        yaml.set("next-cell", snapshot.nextCell());
+        for (JarRecord record : snapshot.records()) {
             String path = "jars." + record.id() + ".";
             yaml.set(path + "owner", record.owner().toString());
             yaml.set(path + "world", record.world());
@@ -96,7 +138,7 @@ public final class JarRepository {
                 location.getBlockX(), location.getBlockY(), location.getBlockZ(),
                 door, portal.x(), portal.y(), portal.z(), nextCell++,
                 scale, assembly.normalized().parts(), true);
-        store(record); save(); return record;
+        store(record); saveAsync(); return record;
     }
 
     public JarRecord createCarried(UUID owner, String world, int x, int y, int z,
@@ -105,7 +147,7 @@ public final class JarRepository {
         JarRecord record = new JarRecord(UUID.randomUUID(), owner, world, x, y, z,
                 door, doorX, doorY, doorZ, nextCell++,
                 scale, assembly.normalized().parts(), false);
-        store(record); save(); return record;
+        store(record); saveAsync(); return record;
     }
 
     public JarRecord replaceInNewCell(JarRecord previous, String world, int x, int y, int z,
@@ -114,14 +156,14 @@ public final class JarRepository {
         JarRecord record = new JarRecord(previous.id(), previous.owner(), world, x, y, z,
                 door, doorX, doorY, doorZ,
                 nextCell++, previous.scale(), assembly.normalized().parts(), placed);
-        store(record); save(); return record;
+        store(record); saveAsync(); return record;
     }
 
-    public void put(JarRecord record) { store(record); save(); }
+    public void put(JarRecord record) { store(record); saveAsync(); }
     public Optional<JarRecord> remove(UUID id) {
         JarRecord removed = records.remove(id);
         portalRecords.remove(id);
-        if (removed != null) save();
+        if (removed != null) saveAsync();
         return Optional.ofNullable(removed);
     }
     public Optional<JarRecord> byId(UUID id) { return Optional.ofNullable(records.get(id)); }
@@ -164,4 +206,6 @@ public final class JarRepository {
     private static int optionalNumber(Object value, int fallback) {
         return value == null ? fallback : number(value);
     }
+
+    private record RepositorySnapshot(int nextCell, List<JarRecord> records) {}
 }

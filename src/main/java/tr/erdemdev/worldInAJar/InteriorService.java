@@ -6,13 +6,20 @@ import org.bukkit.entity.Player;
 import org.bukkit.entity.Entity;
 import org.bukkit.generator.ChunkGenerator;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.BoundingBox;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Deque;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
 
 public final class InteriorService {
     private final JavaPlugin plugin;
@@ -20,8 +27,18 @@ public final class InteriorService {
     private final int gap;
     private final int baseY;
     private final int stride;
+    private final int worldOperationsPerTick;
+    private final long worldWorkNanosPerTick;
     private final Map<UUID, UUID> sessions = new java.util.HashMap<>();
+    private final Deque<WorldJob> worldJobs = new ArrayDeque<>();
+    private final Deque<Runnable> pendingOperations = new ArrayDeque<>();
+    private final Set<Integer> processingCells = new HashSet<>();
+    private final Map<Integer, List<Runnable>> readinessWaiters = new java.util.HashMap<>();
+    private final Map<Long, Integer> retainedChunkCounts = new java.util.HashMap<>();
+    private final Map<Long, Chunk> retainedChunks = new java.util.HashMap<>();
     private World world;
+    private BukkitTask worldJobTask;
+    private boolean operationActive;
 
     public InteriorService(JavaPlugin plugin) {
         this.plugin = plugin;
@@ -29,6 +46,11 @@ public final class InteriorService {
         gap = plugin.getConfig().getInt("interior.cell-gap", 8);
         baseY = plugin.getConfig().getInt("interior.base-y", 64);
         stride = plugin.getConfig().getInt("interior.allocation-stride", 320);
+        worldOperationsPerTick = Math.max(128,
+                plugin.getConfig().getInt("interior.combination-blocks-per-tick", 2048));
+        double millis = Math.max(0.25,
+                plugin.getConfig().getDouble("interior.combination-max-millis-per-tick", 2.0));
+        worldWorkNanosPerTick = (long) (millis * 1_000_000L);
     }
 
     public void loadWorld() {
@@ -49,53 +71,47 @@ public final class InteriorService {
     public int maximumInteriorSize() { return Math.max(1, stride); }
     public int maximumInteriorHeight() { return Math.max(1, world.getMaxHeight() - baseY); }
 
-    public void copyRegions(JarRecord target, List<InteriorCopy> copies) {
-        ensureBuilt(target);
-        CellLayout.Cell destinationCell = cell(target);
-        for (InteriorCopy copy : copies) copyInterior(copy, target, destinationCell);
+    public void copyRegionsAsync(JarRecord target, List<InteriorCopy> copies, Runnable completion) {
+        beginProcessing(target);
+        List<InteriorCopy> copySnapshot = List.copyOf(copies);
+        List<JarRecord> required = new ArrayList<>(copySnapshot.size() + 1);
+        required.add(target);
+        copySnapshot.forEach(copy -> required.add(copy.source()));
+        enqueueOperation(() -> withLoadedChunks(required, chunks -> {
+            Deque<WorldJob> stages = new ArrayDeque<>();
+            addBoundaryPreparation(stages, target);
+            CellLayout.Cell destinationCell = cell(target);
+            for (InteriorCopy copy : copySnapshot) {
+                addBoundaryPreparation(stages, copy.source());
+                stages.addLast(new RegionCopyJob(copy, target, destinationCell));
+            }
+            submit(new SequenceJob(stages, () -> finishProcessing(target, completion), () -> {
+                releaseChunks(chunks);
+                finishOperation();
+            }));
+        }));
     }
 
-    private void copyInterior(InteriorCopy copy, JarRecord target, CellLayout.Cell destinationCell) {
-        JarRecord source = copy.source();
-        ensureBuilt(source);
-        CellLayout.Cell sourceCell = cell(source);
-        int offsetX = copy.offsetX() * target.scale();
-        int offsetY = copy.offsetY() * target.scale();
-        int offsetZ = copy.offsetZ() * target.scale();
-        for (int y = 0; y < source.interiorSizeY(); y++) {
-            for (int x = 0; x < source.interiorSizeX(); x++) {
-                for (int z = 0; z < source.interiorSizeZ(); z++) {
-                    JarAssembly.Cell assemblyCell = new JarAssembly.Cell(
-                            x / source.scale(), y / source.scale(), z / source.scale());
-                    if (!copy.includes(assemblyCell)) continue;
-                    org.bukkit.block.Block block = world.getBlockAt(
-                            sourceCell.minX() + x, sourceCell.minY() + y, sourceCell.minZ() + z);
-                    if (block.getType().isAir() || block.getType() == Material.BARRIER) continue;
-                    Location destination = new Location(world, destinationCell.minX() + offsetX + x,
-                            destinationCell.minY() + offsetY + y, destinationCell.minZ() + offsetZ + z);
-                    if (destination.getBlock().getType() == Material.BARRIER) continue;
-                    block.getState().copy(destination).update(true, false);
-                }
-            }
+    public void ensureBuiltAsync(JarRecord jar, Runnable completion) {
+        if (processingCells.contains(jar.cell())) {
+            readinessWaiters.computeIfAbsent(jar.cell(), ignored -> new ArrayList<>()).add(completion);
+            return;
         }
-
-        BoundingBox sourceBounds = new BoundingBox(sourceCell.minX(), sourceCell.minY(), sourceCell.minZ(),
-                sourceCell.minX() + source.interiorSizeX(), sourceCell.minY() + source.interiorSizeY(),
-                sourceCell.minZ() + source.interiorSizeZ());
-        for (Entity entity : new ArrayList<>(world.getNearbyEntities(sourceBounds))) {
-            int tileX = Math.floorDiv(entity.getLocation().getBlockX() - sourceCell.minX(), source.scale());
-            int tileY = Math.floorDiv(entity.getLocation().getBlockY() - sourceCell.minY(), source.scale());
-            int tileZ = Math.floorDiv(entity.getLocation().getBlockZ() - sourceCell.minZ(), source.scale());
-            if (!copy.includes(new JarAssembly.Cell(tileX, tileY, tileZ))) continue;
-            Location moved = entity.getLocation().clone().add(
-                    destinationCell.minX() + offsetX - sourceCell.minX(),
-                    destinationCell.minY() + offsetY - sourceCell.minY(),
-                    destinationCell.minZ() + offsetZ - sourceCell.minZ());
-            if (entity.teleport(moved) && entity instanceof Player player) {
-                sessions.put(player.getUniqueId(), target.id());
-                applyEnvironment(player, target);
+        beginProcessing(jar);
+        enqueueOperation(() -> withLoadedChunks(List.of(jar), chunks -> {
+            Deque<WorldJob> stages = new ArrayDeque<>();
+            addBoundaryPreparation(stages, jar);
+            if (stages.isEmpty()) {
+                releaseChunks(chunks);
+                finishProcessing(jar, completion);
+                finishOperation();
+                return;
             }
-        }
+            submit(new SequenceJob(stages, () -> finishProcessing(jar, completion), () -> {
+                releaseChunks(chunks);
+                finishOperation();
+            }));
+        }));
     }
 
     public record InteriorCopy(JarRecord source, int offsetX, int offsetY, int offsetZ,
@@ -113,61 +129,52 @@ public final class InteriorService {
         public boolean includes(JarAssembly.Cell cell) { return cells.contains(cell); }
     }
 
-    public void ensureBuilt(JarRecord jar) {
+    public boolean ensureBuilt(JarRecord jar) {
+        if (!isReady(jar)) return false;
         CellLayout.Cell c = cell(jar);
-        // A marker below the cell makes initialization idempotent across restarts.
-        if (world.getBlockAt(c.minX(), c.minY() - 2, c.minZ()).getType() == Material.BEDROCK) {
-            buildBoundary(jar, false);
-            return;
-        }
-        buildBoundary(jar, true);
-        world.getBlockAt(c.minX(), c.minY() - 2, c.minZ()).setType(Material.BEDROCK, false);
+        if (world.isChunkLoaded(c.minX() >> 4, c.minZ() >> 4)
+                && isBuilt(jar) && isBoundaryCurrent(jar)) return true;
+        ensureBuiltAsync(jar, () -> {});
+        return false;
     }
 
-    private void buildBoundary(JarRecord jar, boolean clearOpenEdges) {
+    public boolean isReady(JarRecord jar) {
+        return !processingCells.contains(jar.cell());
+    }
+
+    private void beginProcessing(JarRecord jar) {
+        if (!processingCells.add(jar.cell())) {
+            throw new IllegalStateException("Interior cell is already being processed: " + jar.cell());
+        }
+    }
+
+    private void finishProcessing(JarRecord jar, Runnable completion) {
+        processingCells.remove(jar.cell());
+        try { completion.run(); }
+        finally {
+            List<Runnable> waiters = readinessWaiters.remove(jar.cell());
+            if (waiters != null) waiters.forEach(Runnable::run);
+        }
+    }
+
+    private void addBoundaryPreparation(Deque<WorldJob> stages, JarRecord jar) {
+        if (!isBuilt(jar)) stages.addLast(new BoundaryJob(jar));
+        else if (!isBoundaryCurrent(jar)) stages.addLast(new BoundaryRepairJob(jar));
+    }
+
+    private boolean isBuilt(JarRecord jar) {
         CellLayout.Cell c = cell(jar);
-        int scale = jar.scale();
-        JarAssembly assembly = jar.assembly();
-        for (JarAssembly.Cell cell : assembly.cells()) {
-            int baseX = c.minX() + cell.x() * scale;
-            int baseY = c.minY() + cell.y() * scale;
-            int baseZ = c.minZ() + cell.z() * scale;
-            for (int x = 0; x < scale; x++) for (int z = 0; z < scale; z++) {
-                boundaryBlock(assembly.contains(cell.x(), cell.y() - 1, cell.z()), clearOpenEdges,
-                        baseX + x, baseY, baseZ + z);
-                boundaryBlock(assembly.contains(cell.x(), cell.y() + 1, cell.z()), clearOpenEdges,
-                        baseX + x, baseY + scale - 1, baseZ + z);
-            }
-            for (int y = 1; y < scale - 1; y++) {
-                boundaryPlane(assembly.contains(cell.x() - 1, cell.y(), cell.z()), clearOpenEdges,
-                        baseX, baseY + y, baseZ, 0, 1, scale);
-                boundaryPlane(assembly.contains(cell.x() + 1, cell.y(), cell.z()), clearOpenEdges,
-                        baseX + scale - 1, baseY + y, baseZ, 0, 1, scale);
-                boundaryPlane(assembly.contains(cell.x(), cell.y(), cell.z() - 1), clearOpenEdges,
-                        baseX, baseY + y, baseZ, 1, 0, scale);
-                boundaryPlane(assembly.contains(cell.x(), cell.y(), cell.z() + 1), clearOpenEdges,
-                        baseX, baseY + y, baseZ + scale - 1, 1, 0, scale);
-            }
-        }
+        return world.getBlockAt(c.minX(), c.minY() - 2, c.minZ()).getType() == Material.BEDROCK;
     }
 
-    private void boundaryBlock(boolean open, boolean clearOpen, int x, int y, int z) {
-        if (open && !clearOpen) return;
-        world.getBlockAt(x, y, z).setType(open ? Material.AIR : Material.BARRIER, false);
-    }
-
-    private void boundaryPlane(boolean open, boolean clearOpen, int x, int y, int z,
-                               int stepX, int stepZ, int length) {
-        if (open && !clearOpen) return;
-        Material material = open ? Material.AIR : Material.BARRIER;
-        for (int offset = 0; offset < length; offset++) {
-            world.getBlockAt(x + offset * stepX, y, z + offset * stepZ).setType(material, false);
-        }
+    private boolean isBoundaryCurrent(JarRecord jar) {
+        CellLayout.Cell c = cell(jar);
+        return world.getBlockAt(c.minX(), c.minY() - 3, c.minZ()).getType() == Material.BEDROCK;
     }
 
     public void enter(Player player, JarRecord jar) {
         if (!jar.hasPortal()) return;
-        ensureBuilt(jar);
+        if (!ensureBuilt(jar)) return;
         sessions.put(player.getUniqueId(), jar.id());
         CellLayout.Cell c = cell(jar);
         Location doorBlock = jar.doorBlockLocation();
@@ -261,12 +268,19 @@ public final class InteriorService {
     }
 
     public void destroyCell(JarRecord jar) {
-        CellLayout.Cell c = cell(jar);
-        int sizeX = jar.interiorSizeX(), sizeY = jar.interiorSizeY(), sizeZ = jar.interiorSizeZ();
-        BoundingBox bounds = new BoundingBox(c.minX(), c.minY(), c.minZ(),
-                c.minX() + sizeX, c.minY() + sizeY, c.minZ() + sizeZ);
-        world.getNearbyEntities(bounds, entity -> !(entity instanceof Player)).forEach(org.bukkit.entity.Entity::remove);
-        plugin.getServer().getScheduler().runTask(plugin, new CellCleanup(c, sizeX, sizeY, sizeZ));
+        enqueueOperation(() -> withLoadedChunks(List.of(jar), chunks -> {
+            CellLayout.Cell c = cell(jar);
+            int sizeX = jar.interiorSizeX(), sizeY = jar.interiorSizeY(), sizeZ = jar.interiorSizeZ();
+            BoundingBox bounds = new BoundingBox(c.minX(), c.minY(), c.minZ(),
+                    c.minX() + sizeX, c.minY() + sizeY, c.minZ() + sizeZ);
+            world.getNearbyEntities(bounds, entity -> !(entity instanceof Player))
+                    .forEach(org.bukkit.entity.Entity::remove);
+            submit(new SequenceJob(new ArrayDeque<>(List.of(new CellCleanup(jar))),
+                    () -> {}, () -> {
+                releaseChunks(chunks);
+                finishOperation();
+            }));
+        }));
     }
 
     public void pruneSessions(JarRepository repository) {
@@ -286,6 +300,16 @@ public final class InteriorService {
     }
 
     public void stop() {
+        if (worldJobTask != null) worldJobTask.cancel();
+        worldJobTask = null;
+        worldJobs.clear();
+        pendingOperations.clear();
+        operationActive = false;
+        retainedChunks.values().forEach(chunk -> chunk.removePluginChunkTicket(plugin));
+        retainedChunks.clear();
+        retainedChunkCounts.clear();
+        processingCells.clear();
+        readinessWaiters.clear();
         for (UUID playerId : new ArrayList<>(sessions.keySet())) {
             Player player = Bukkit.getPlayer(playerId);
             if (player != null) resetEnvironment(player);
@@ -353,13 +377,418 @@ public final class InteriorService {
         int cellZ = relativeZ / jar.scale();
         int localX = relativeX % jar.scale(), localY = relativeY % jar.scale();
         int localZ = relativeZ % jar.scale();
-        JarAssembly assembly = jar.assembly();
-        return localY == 0 && !assembly.contains(cellX, cellY - 1, cellZ)
-                || localY == jar.scale() - 1 && !assembly.contains(cellX, cellY + 1, cellZ)
-                || localX == 0 && !assembly.contains(cellX - 1, cellY, cellZ)
-                || localX == jar.scale() - 1 && !assembly.contains(cellX + 1, cellY, cellZ)
-                || localZ == 0 && !assembly.contains(cellX, cellY, cellZ - 1)
-                || localZ == jar.scale() - 1 && !assembly.contains(cellX, cellY, cellZ + 1);
+        return InteriorBoundary.isBarrier(jar.assembly(),
+                new JarAssembly.Cell(cellX, cellY, cellZ), jar.scale(), localX, localY, localZ);
+    }
+
+    private void enqueueOperation(Runnable starter) {
+        pendingOperations.addLast(starter);
+        startNextOperation();
+    }
+
+    private void startNextOperation() {
+        if (operationActive || pendingOperations.isEmpty()) return;
+        operationActive = true;
+        try {
+            pendingOperations.removeFirst().run();
+        } catch (RuntimeException exception) {
+            operationActive = false;
+            plugin.getLogger().severe("Could not start interior operation: " + exception.getMessage());
+            startNextOperation();
+        }
+    }
+
+    private void finishOperation() {
+        operationActive = false;
+        startNextOperation();
+    }
+
+    private void withLoadedChunks(Collection<JarRecord> jars, Consumer<List<Chunk>> action) {
+        Set<ChunkCoordinate> coordinates = new HashSet<>();
+        for (JarRecord jar : jars) coordinates.addAll(interiorChunks(jar));
+        List<CompletableFuture<Chunk>> loads = coordinates.stream()
+                .map(coordinate -> world.getChunkAtAsync(coordinate.x(), coordinate.z(), true)
+                        .exceptionally(exception -> {
+                            plugin.getLogger().warning("Could not load an interior chunk: "
+                                    + exception.getMessage());
+                            return null;
+                        }))
+                .toList();
+        CompletableFuture.allOf(loads.toArray(CompletableFuture[]::new)).thenRun(() -> {
+            List<Chunk> loaded = loads.stream().map(CompletableFuture::join)
+                    .filter(java.util.Objects::nonNull).toList();
+            Runnable completion = () -> {
+                retainChunks(loaded);
+                try { action.accept(loaded); }
+                catch (RuntimeException exception) {
+                    releaseChunks(loaded);
+                    throw exception;
+                }
+            };
+            if (Bukkit.isPrimaryThread()) completion.run();
+            else if (plugin.isEnabled()) plugin.getServer().getScheduler().runTask(plugin, completion);
+        });
+    }
+
+    private Set<ChunkCoordinate> interiorChunks(JarRecord jar) {
+        Set<ChunkCoordinate> result = new HashSet<>();
+        CellLayout.Cell destination = cell(jar);
+        int scale = jar.scale();
+        for (JarAssembly.Cell assemblyCell : jar.assembly().cells()) {
+            int minX = destination.minX() + assemblyCell.x() * scale;
+            int minZ = destination.minZ() + assemblyCell.z() * scale;
+            int maxX = minX + scale - 1;
+            int maxZ = minZ + scale - 1;
+            for (int chunkX = minX >> 4; chunkX <= maxX >> 4; chunkX++) {
+                for (int chunkZ = minZ >> 4; chunkZ <= maxZ >> 4; chunkZ++) {
+                    result.add(new ChunkCoordinate(chunkX, chunkZ));
+                }
+            }
+        }
+        return result;
+    }
+
+    private void retainChunks(List<Chunk> chunks) {
+        for (Chunk chunk : chunks) {
+            long key = Chunk.getChunkKey(chunk.getX(), chunk.getZ());
+            if (retainedChunkCounts.merge(key, 1, Integer::sum) == 1) {
+                chunk.addPluginChunkTicket(plugin);
+                retainedChunks.put(key, chunk);
+            }
+        }
+    }
+
+    private void releaseChunks(List<Chunk> chunks) {
+        for (Chunk chunk : chunks) {
+            long key = Chunk.getChunkKey(chunk.getX(), chunk.getZ());
+            Integer count = retainedChunkCounts.get(key);
+            if (count == null) continue;
+            if (count > 1) {
+                retainedChunkCounts.put(key, count - 1);
+            } else {
+                retainedChunkCounts.remove(key);
+                retainedChunks.remove(key);
+                chunk.removePluginChunkTicket(plugin);
+            }
+        }
+    }
+
+    private void submit(WorldJob job) {
+        worldJobs.addLast(job);
+        if (worldJobTask == null) {
+            worldJobTask = plugin.getServer().getScheduler().runTaskTimer(plugin,
+                    this::runWorldJobs, 1L, 1L);
+        }
+    }
+
+    private void runWorldJobs() {
+        long deadline = System.nanoTime() + worldWorkNanosPerTick;
+        int operations = 0;
+        while (!worldJobs.isEmpty() && operations < worldOperationsPerTick
+                && System.nanoTime() < deadline) {
+            WorldJob job = worldJobs.getFirst();
+            boolean complete = false;
+            int quantum = Math.min(128, worldOperationsPerTick - operations);
+            try {
+                for (int index = 0; index < quantum && System.nanoTime() < deadline; index++) {
+                    operations++;
+                    if (job.step()) {
+                        complete = true;
+                        break;
+                    }
+                }
+            } catch (RuntimeException exception) {
+                complete = true;
+                plugin.getLogger().severe("Interior world job failed: " + exception.getMessage());
+                exception.printStackTrace();
+                job.fail();
+            }
+            if (complete) worldJobs.removeFirst();
+        }
+        if (worldJobs.isEmpty() && worldJobTask != null) {
+            worldJobTask.cancel();
+            worldJobTask = null;
+        }
+    }
+
+    private interface WorldJob {
+        /** Performs at most one bounded world operation and returns true when complete. */
+        boolean step();
+        default void fail() {}
+    }
+
+    private record ChunkCoordinate(int x, int z) {}
+
+    private final class SequenceJob implements WorldJob {
+        private final Deque<WorldJob> stages;
+        private final Runnable completion;
+        private final Runnable cleanup;
+
+        private SequenceJob(Deque<WorldJob> stages, Runnable completion) {
+            this(stages, completion, () -> {});
+        }
+
+        private SequenceJob(Deque<WorldJob> stages, Runnable completion, Runnable cleanup) {
+            this.stages = stages;
+            this.completion = completion;
+            this.cleanup = cleanup;
+        }
+
+        @Override public boolean step() {
+            while (!stages.isEmpty()) {
+                if (!stages.getFirst().step()) return false;
+                stages.removeFirst();
+            }
+            try { completion.run(); }
+            finally { cleanup.run(); }
+            return true;
+        }
+
+        @Override public void fail() { cleanup.run(); }
+    }
+
+    private final class BoundaryJob implements WorldJob {
+        private final JarRecord jar;
+        private final CellLayout.Cell destination;
+        private final List<JarAssembly.Cell> cells;
+        private final int scale;
+        private final int floorArea;
+        private final int wallArea;
+        private final int operationsPerCell;
+        private int cellIndex;
+        private int operationIndex;
+        private boolean marked;
+
+        private BoundaryJob(JarRecord jar) {
+            this.jar = jar;
+            destination = cell(jar);
+            cells = List.copyOf(jar.assembly().cells());
+            scale = jar.scale();
+            floorArea = scale * scale;
+            wallArea = Math.max(0, scale - 2) * scale;
+            operationsPerCell = floorArea * 2 + wallArea * 4;
+        }
+
+        @Override public boolean step() {
+            if (isBuilt(jar)) return true;
+            if (cellIndex >= cells.size()) {
+                if (!marked) {
+                    world.getBlockAt(destination.minX(), destination.minY() - 2,
+                            destination.minZ()).setType(Material.BEDROCK, false);
+                    world.getBlockAt(destination.minX(), destination.minY() - 3,
+                            destination.minZ()).setType(Material.BEDROCK, false);
+                    marked = true;
+                }
+                return true;
+            }
+
+            JarAssembly.Cell assemblyCell = cells.get(cellIndex);
+            int local = operationIndex;
+            int localX;
+            int localY;
+            int localZ;
+            if (local < floorArea) {
+                localX = local % scale;
+                localY = 0;
+                localZ = local / scale;
+            } else if ((local -= floorArea) < floorArea) {
+                localX = local % scale;
+                localY = scale - 1;
+                localZ = local / scale;
+            } else if ((local -= floorArea) < wallArea) {
+                localX = 0;
+                localY = local / scale + 1;
+                localZ = local % scale;
+            } else if ((local -= wallArea) < wallArea) {
+                localX = scale - 1;
+                localY = local / scale + 1;
+                localZ = local % scale;
+            } else if ((local -= wallArea) < wallArea) {
+                localX = local % scale;
+                localY = local / scale + 1;
+                localZ = 0;
+            } else {
+                local -= wallArea;
+                localX = local % scale;
+                localY = local / scale + 1;
+                localZ = scale - 1;
+            }
+
+            Material material = InteriorBoundary.isBarrier(
+                    jar.assembly(), assemblyCell, scale, localX, localY, localZ)
+                    ? Material.BARRIER : Material.AIR;
+            int baseX = destination.minX() + assemblyCell.x() * scale;
+            int baseY = destination.minY() + assemblyCell.y() * scale;
+            int baseZ = destination.minZ() + assemblyCell.z() * scale;
+            world.getBlockAt(baseX + localX, baseY + localY, baseZ + localZ)
+                    .setType(material, false);
+
+            operationIndex++;
+            if (operationIndex >= operationsPerCell) {
+                operationIndex = 0;
+                cellIndex++;
+            }
+            return false;
+        }
+    }
+
+    /** Adds only newly required barriers so upgrading cannot erase blocks at shared faces. */
+    private final class BoundaryRepairJob implements WorldJob {
+        private final JarRecord jar;
+        private final CellLayout.Cell destination;
+        private final List<JarAssembly.Cell> cells;
+        private final int scale;
+        private final int floorArea;
+        private final int wallArea;
+        private final int operationsPerCell;
+        private int cellIndex;
+        private int operationIndex;
+
+        private BoundaryRepairJob(JarRecord jar) {
+            this.jar = jar;
+            destination = cell(jar);
+            cells = List.copyOf(jar.assembly().cells());
+            scale = jar.scale();
+            floorArea = scale * scale;
+            wallArea = Math.max(0, scale - 2) * scale;
+            operationsPerCell = floorArea * 2 + wallArea * 4;
+        }
+
+        @Override public boolean step() {
+            if (isBoundaryCurrent(jar)) return true;
+            if (cellIndex >= cells.size()) {
+                world.getBlockAt(destination.minX(), destination.minY() - 3,
+                        destination.minZ()).setType(Material.BEDROCK, false);
+                return true;
+            }
+
+            int local = operationIndex;
+            int localX;
+            int localY;
+            int localZ;
+            if (local < floorArea) {
+                localX = local % scale;
+                localY = 0;
+                localZ = local / scale;
+            } else if ((local -= floorArea) < floorArea) {
+                localX = local % scale;
+                localY = scale - 1;
+                localZ = local / scale;
+            } else if ((local -= floorArea) < wallArea) {
+                localX = 0;
+                localY = local / scale + 1;
+                localZ = local % scale;
+            } else if ((local -= wallArea) < wallArea) {
+                localX = scale - 1;
+                localY = local / scale + 1;
+                localZ = local % scale;
+            } else if ((local -= wallArea) < wallArea) {
+                localX = local % scale;
+                localY = local / scale + 1;
+                localZ = 0;
+            } else {
+                local -= wallArea;
+                localX = local % scale;
+                localY = local / scale + 1;
+                localZ = scale - 1;
+            }
+            JarAssembly.Cell assemblyCell = cells.get(cellIndex);
+            if (InteriorBoundary.isBarrier(
+                    jar.assembly(), assemblyCell, scale, localX, localY, localZ)) {
+                int baseX = destination.minX() + assemblyCell.x() * scale;
+                int baseY = destination.minY() + assemblyCell.y() * scale;
+                int baseZ = destination.minZ() + assemblyCell.z() * scale;
+                world.getBlockAt(baseX + localX, baseY + localY, baseZ + localZ)
+                        .setType(Material.BARRIER, false);
+            }
+
+            operationIndex++;
+            if (operationIndex >= operationsPerCell) {
+                operationIndex = 0;
+                cellIndex++;
+            }
+            return false;
+        }
+    }
+
+    private final class RegionCopyJob implements WorldJob {
+        private final InteriorCopy copy;
+        private final JarRecord target;
+        private final JarRecord source;
+        private final CellLayout.Cell sourceCell;
+        private final CellLayout.Cell destinationCell;
+        private final int sizeX;
+        private final int sizeY;
+        private final int sizeZ;
+        private final int scale;
+        private final int cellVolume;
+        private final List<JarAssembly.Cell> includedCells;
+        private final int volume;
+        private final int offsetX;
+        private final int offsetY;
+        private final int offsetZ;
+        private int index;
+        private List<Entity> entities;
+        private int entityIndex;
+
+        private RegionCopyJob(InteriorCopy copy, JarRecord target,
+                              CellLayout.Cell destinationCell) {
+            this.copy = copy;
+            this.target = target;
+            source = copy.source();
+            sourceCell = cell(source);
+            this.destinationCell = destinationCell;
+            sizeX = source.interiorSizeX();
+            sizeY = source.interiorSizeY();
+            sizeZ = source.interiorSizeZ();
+            scale = source.scale();
+            cellVolume = Math.multiplyExact(Math.multiplyExact(scale, scale), scale);
+            includedCells = List.copyOf(copy.cells());
+            volume = Math.multiplyExact(includedCells.size(), cellVolume);
+            offsetX = copy.offsetX() * target.scale();
+            offsetY = copy.offsetY() * target.scale();
+            offsetZ = copy.offsetZ() * target.scale();
+        }
+
+        @Override public boolean step() {
+            if (index < volume) {
+                JarAssembly.Cell assemblyCell = includedCells.get(index / cellVolume);
+                int local = index % cellVolume;
+                int x = assemblyCell.x() * scale + local % scale;
+                int z = assemblyCell.z() * scale + (local / scale) % scale;
+                int y = assemblyCell.y() * scale + local / (scale * scale);
+                index++;
+                org.bukkit.block.Block block = world.getBlockAt(
+                        sourceCell.minX() + x, sourceCell.minY() + y, sourceCell.minZ() + z);
+                if (block.getType().isAir() || block.getType() == Material.BARRIER) return false;
+                Location destination = new Location(world, destinationCell.minX() + offsetX + x,
+                        destinationCell.minY() + offsetY + y, destinationCell.minZ() + offsetZ + z);
+                if (destination.getBlock().getType() != Material.BARRIER) {
+                    block.getState().copy(destination).update(true, false);
+                }
+                return false;
+            }
+            if (entities == null) {
+                BoundingBox bounds = new BoundingBox(sourceCell.minX(), sourceCell.minY(), sourceCell.minZ(),
+                        sourceCell.minX() + sizeX, sourceCell.minY() + sizeY, sourceCell.minZ() + sizeZ);
+                entities = new ArrayList<>(world.getNearbyEntities(bounds));
+            }
+            if (entityIndex >= entities.size()) return true;
+            Entity entity = entities.get(entityIndex++);
+            int tileX = Math.floorDiv(entity.getLocation().getBlockX() - sourceCell.minX(), source.scale());
+            int tileY = Math.floorDiv(entity.getLocation().getBlockY() - sourceCell.minY(), source.scale());
+            int tileZ = Math.floorDiv(entity.getLocation().getBlockZ() - sourceCell.minZ(), source.scale());
+            if (!copy.includes(new JarAssembly.Cell(tileX, tileY, tileZ))) return false;
+            Location moved = entity.getLocation().clone().add(
+                    destinationCell.minX() + offsetX - sourceCell.minX(),
+                    destinationCell.minY() + offsetY - sourceCell.minY(),
+                    destinationCell.minZ() + offsetZ - sourceCell.minZ());
+            if (entity.teleport(moved) && entity instanceof Player player) {
+                sessions.put(player.getUniqueId(), target.id());
+                applyEnvironment(player, target);
+            }
+            return false;
+        }
     }
 
     public enum ExitResult { EXITED, NOT_INSIDE, CLOGGED }
@@ -373,38 +802,37 @@ public final class InteriorService {
         @Override public boolean shouldGenerateStructures() { return false; }
     }
 
-    private final class CellCleanup implements Runnable {
-        private static final int BLOCKS_PER_TICK = 8192;
+    private final class CellCleanup implements WorldJob {
         private final CellLayout.Cell cell;
-        private final int sizeX;
-        private final int sizeY;
-        private final int sizeZ;
+        private final List<JarAssembly.Cell> assemblyCells;
+        private final int scale;
+        private final int cellVolume;
         private final int volume;
         private int index;
 
-        private CellCleanup(CellLayout.Cell cell, int sizeX, int sizeY, int sizeZ) {
-            this.cell = cell;
-            this.sizeX = sizeX;
-            this.sizeY = sizeY;
-            this.sizeZ = sizeZ;
-            this.volume = sizeX * sizeY * sizeZ;
+        private CellCleanup(JarRecord jar) {
+            cell = InteriorService.this.cell(jar);
+            assemblyCells = List.copyOf(jar.assembly().cells());
+            scale = jar.scale();
+            cellVolume = Math.multiplyExact(Math.multiplyExact(scale, scale), scale);
+            volume = Math.multiplyExact(assemblyCells.size(), cellVolume);
         }
 
-        @Override
-        public void run() {
-            int end = Math.min(volume, index + BLOCKS_PER_TICK);
-            while (index < end) {
-                int x = index % sizeX;
-                int z = (index / sizeX) % sizeZ;
-                int y = index / (sizeX * sizeZ);
-                world.getBlockAt(cell.minX() + x, cell.minY() + y, cell.minZ() + z).setType(Material.AIR, false);
-                index++;
-            }
-            if (index < volume) {
-                plugin.getServer().getScheduler().runTask(plugin, this);
-            } else {
+        @Override public boolean step() {
+            if (index >= volume) {
                 world.getBlockAt(cell.minX(), cell.minY() - 2, cell.minZ()).setType(Material.AIR, false);
+                world.getBlockAt(cell.minX(), cell.minY() - 3, cell.minZ()).setType(Material.AIR, false);
+                return true;
             }
+            JarAssembly.Cell assemblyCell = assemblyCells.get(index / cellVolume);
+            int local = index % cellVolume;
+            int x = assemblyCell.x() * scale + local % scale;
+            int z = assemblyCell.z() * scale + (local / scale) % scale;
+            int y = assemblyCell.y() * scale + local / (scale * scale);
+            world.getBlockAt(cell.minX() + x, cell.minY() + y, cell.minZ() + z)
+                    .setType(Material.AIR, false);
+            index++;
+            return false;
         }
     }
 }

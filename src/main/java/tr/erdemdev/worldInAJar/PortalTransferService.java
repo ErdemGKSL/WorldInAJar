@@ -80,7 +80,7 @@ public final class PortalTransferService {
     public boolean insertFromCursor(ItemStack cursor, JarRecord jar) {
         if (cursor == null || cursor.getType().isAir() || jar == null || jar.placed() || !jar.hasPortal()) return false;
         if (jar.id().equals(items.id(cursor))) return false;
-        interiors.ensureBuilt(jar);
+        if (!interiors.ensureBuilt(jar)) return false;
         Item inserted = interiors.world().dropItem(insideDestination(jar, null), cursor.clone());
         inserted.setVelocity(inwardVelocity(jar.door(), 0.18));
         return true;
@@ -218,7 +218,7 @@ public final class PortalTransferService {
     }
 
     private void transferInside(Entity entity, JarRecord jar) {
-        interiors.ensureBuilt(jar);
+        if (!interiors.ensureBuilt(jar)) return;
         Vector velocity = entity.getVelocity().clone();
         if (!entity.teleport(insideDestination(jar, entity))) return;
         markTransferred(entity);

@@ -40,7 +40,7 @@ public final class WorldInAJar extends JavaPlugin {
         if (transfers != null) transfers.stop();
         if (previews != null) previews.stop();
         if (interiors != null) interiors.stop();
-        if (repository != null) repository.save();
+        if (repository != null) repository.close();
         getServer().removeRecipe(recipeKey());
         if (items != null) getServer().removeRecipe(items.portalSideRecipeKey());
         removeLegacyCombinationRecipes();

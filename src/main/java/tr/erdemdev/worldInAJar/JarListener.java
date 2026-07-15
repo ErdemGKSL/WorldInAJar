@@ -43,6 +43,7 @@ public final class JarListener implements Listener {
     private final InteriorService interiors;
     private final PreviewService previews;
     private final PortalTransferService transfers;
+    private final Set<UUID> combinationsInProgress = new java.util.HashSet<>();
 
     public JarListener(WorldInAJar plugin, JarRepository repository, JarItems items,
                        InteriorService interiors, PreviewService previews, PortalTransferService transfers) {
@@ -88,6 +89,11 @@ public final class JarListener implements Listener {
         int scale = items.scale(event.getItemInHand());
         UUID storedId = items.id(event.getItemInHand());
         JarRecord jar = storedId == null ? null : repository.byId(storedId).orElse(null);
+        if (jar != null && combinationsInProgress.contains(jar.id())) {
+            event.setCancelled(true);
+            event.getPlayer().sendMessage("§cThat jar is still being changed.");
+            return;
+        }
         if (jar != null) {
             assembly = jar.assembly();
             scale = jar.scale();
@@ -116,9 +122,11 @@ public final class JarListener implements Listener {
             repository.put(jar);
         }
         placeFootprint(jar, Material.GLASS);
-        interiors.ensureBuilt(jar);
-        previews.invalidate(jar);
-        previews.refresh(jar);
+        JarRecord placedJar = jar;
+        interiors.ensureBuiltAsync(placedJar, () -> {
+            previews.invalidate(placedJar);
+            previews.refresh(placedJar);
+        });
         event.getPlayer().sendMessage("§aJar placed. Right-click the side facing you to enter.");
     }
 
@@ -134,8 +142,18 @@ public final class JarListener implements Listener {
             }
             return;
         }
-        event.setDropItems(false);
+        if (combinationsInProgress.contains(jar.id()) || !interiors.isReady(jar)) {
+            event.setCancelled(true);
+            event.getPlayer().sendMessage("§cThat jar world is not ready yet. Please wait.");
+            return;
+        }
         boolean detach = event.getPlayer().isSneaking();
+        if (detach && jar.parts().size() > 1 && !interiors.ensureBuilt(jar)) {
+            event.setCancelled(true);
+            event.getPlayer().sendMessage("§cThat jar world is not ready yet. Please wait.");
+            return;
+        }
+        event.setDropItems(false);
         plugin.getServer().getScheduler().runTask(plugin, () -> {
             if (event.isCancelled()) return;
             JarRecord current = repository.byId(jar.id()).orElse(null);
@@ -166,6 +184,11 @@ public final class JarListener implements Listener {
         if (block == null) return;
         JarRecord jar = repository.at(block.getLocation()).orElse(null);
         if (jar == null) return;
+        if (combinationsInProgress.contains(jar.id()) || !interiors.isReady(jar)) {
+            event.setCancelled(true);
+            event.getPlayer().sendMessage("§cThat jar world is not ready yet. Please wait.");
+            return;
+        }
         boolean clickedPortal = jar.hasPortal() && event.getBlockFace() == jar.door()
                 && block.equals(jar.doorBlockLocation().getBlock());
         if (clickedPortal && empty(event.getItem())) {
@@ -185,6 +208,11 @@ public final class JarListener implements Listener {
         Block block = event.getClickedBlock();
         if (block == null) return;
         JarRecord jar = repository.at(block.getLocation()).orElse(null);
+        if (jar != null && (combinationsInProgress.contains(jar.id()) || !interiors.isReady(jar))) {
+            event.setCancelled(true);
+            event.getPlayer().sendMessage("§cThat jar world is not ready yet. Please wait.");
+            return;
+        }
         boolean clickedPortal = jar != null && jar.hasPortal() && event.getBlockFace() == jar.door()
                 && block.equals(jar.doorBlockLocation().getBlock());
         if (jar != null && horizontal(event.getBlockFace()) && items.isPortalSide(event.getItem())) {
@@ -195,6 +223,10 @@ public final class JarListener implements Listener {
         if (clickedPortal) {
             if (!event.getPlayer().hasPermission("worldinajar.enter")) {
                 event.getPlayer().sendMessage("§cYou do not have permission to enter jars."); return;
+            }
+            if (!interiors.ensureBuilt(jar)) {
+                event.setCancelled(true);
+                event.getPlayer().sendMessage("§cThat jar world is not ready yet. Please wait."); return;
             }
             if (interiors.isClogged(jar)) {
                 event.setCancelled(true);
@@ -309,6 +341,7 @@ public final class JarListener implements Listener {
 
     private void checkDeletedNextTick(UUID id) {
         plugin.getServer().getScheduler().runTask(plugin, () -> {
+            if (combinationsInProgress.contains(id)) return;
             JarRecord jar = repository.byId(id).orElse(null);
             if (jar != null && !jar.placed() && !itemExists(id)) deleteJar(id);
         });
@@ -386,6 +419,10 @@ public final class JarListener implements Listener {
     }
 
     private void attach(Player player, JarRecord target, Block clicked, BlockFace face, ItemStack held) {
+        if (!interiors.ensureBuilt(target)) {
+            player.sendMessage("§cThe target jar world is not ready yet. Please wait.");
+            return;
+        }
         JarAssembly targetAssembly = target.assembly();
         int targetCellX = clicked.getX() - target.x(), targetCellY = clicked.getY() - target.y();
         int targetCellZ = clicked.getZ() - target.z();
@@ -413,16 +450,61 @@ public final class JarListener implements Listener {
             player.sendMessage("§cJars created with different interior scales cannot be attached.");
             return;
         }
+        if (source != null && !interiors.ensureBuilt(source)) {
+            player.sendMessage("§cThe held jar world is not ready yet. Please wait before combining it.");
+            return;
+        }
+        if (!reserveCombination(target.id(), sourceId)) {
+            player.sendMessage("§cOne of those jars is already being changed.");
+            return;
+        }
+        ItemStack heldSnapshot = held.clone();
+        int maximum = Math.max(1, plugin.getConfig().getInt("jar.max-combined-size", 9));
+        int maximumInteriorSize = interiors.maximumInteriorSize();
+        int maximumInteriorHeight = interiors.maximumInteriorHeight();
+        int clickedX = clicked.getX(), clickedY = clicked.getY(), clickedZ = clicked.getZ();
+        JarRecord plannedSource = source;
+        plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
+            List<CombinationPlanner.AttachmentCandidate> candidates;
+            try {
+                candidates = CombinationPlanner.attachmentCandidates(target,
+                        clickedX, clickedY, clickedZ, face, sourceAssembly,
+                        maximum, maximumInteriorSize, maximumInteriorHeight);
+            } catch (RuntimeException exception) {
+                plugin.getLogger().warning("Could not calculate jar attachment: " + exception.getMessage());
+                candidates = List.of();
+            }
+            List<CombinationPlanner.AttachmentCandidate> completed = candidates;
+            plugin.getServer().getScheduler().runTask(plugin, () -> applyAttachment(player, target,
+                    plannedSource, sourceId, sourceAssembly, clicked, heldSnapshot, completed));
+        });
+    }
 
-        AttachmentPlan plan = findAttachment(target, clicked, face, sourceAssembly);
+    private void applyAttachment(Player player, JarRecord target, JarRecord source, UUID sourceId,
+                                 JarAssembly sourceAssembly, Block clicked, ItemStack heldSnapshot,
+                                 List<CombinationPlanner.AttachmentCandidate> candidates) {
+        JarRecord currentTarget = repository.byId(target.id()).orElse(null);
+        JarRecord currentSource = sourceId == null ? null : repository.byId(sourceId).orElse(null);
+        if (!player.isOnline() || !target.equals(currentTarget)
+                || sourceId != null && !source.equals(currentSource)
+                || !heldSnapshot.isSimilar(player.getInventory().getItemInMainHand())) {
+            releaseCombination(target.id(), sourceId);
+            return;
+        }
+        CombinationPlanner.AttachmentCandidate plan = candidates.stream()
+                .filter(candidate -> attachmentSpaceClear(clicked, sourceAssembly, candidate))
+                .findFirst().orElse(null);
         if (plan == null) {
+            releaseCombination(target.id(), sourceId);
             player.sendMessage("§cThe held jar does not fit on that side or exceeds the size limit.");
             return;
         }
-        int sourceOriginX = plan.sourceOriginX(), sourceOriginY = plan.sourceOriginY();
-        int sourceOriginZ = plan.sourceOriginZ();
-        JarAssembly global = plan.global(), combined = global.normalized();
 
+        int sourceOriginX = plan.sourceOriginX();
+        int sourceOriginY = plan.sourceOriginY();
+        int sourceOriginZ = plan.sourceOriginZ();
+        JarAssembly global = plan.global();
+        JarAssembly combined = global.normalized();
         BlockFace portalFace = target.door();
         int portalX = target.hasPortal() ? target.x() + target.doorX() - global.minX() : 0;
         int portalY = target.hasPortal() ? target.y() + target.doorY() - global.minY() : 0;
@@ -442,153 +524,131 @@ public final class JarListener implements Listener {
             }
         }
 
-        JarRecord oldTarget = target;
-        JarRecord combinedRecord = repository.replaceInNewCell(oldTarget, target.world(), global.minX(), global.minY(),
-                global.minZ(), portalFace, portalX, portalY, portalZ, combined, true);
+        JarRecord combinedRecord = repository.replaceInNewCell(target, target.world(), global.minX(),
+                global.minY(), global.minZ(), portalFace, portalX, portalY, portalZ, combined, true);
         List<InteriorService.InteriorCopy> copies = new ArrayList<>();
-        copies.add(new InteriorService.InteriorCopy(oldTarget,
+        copies.add(new InteriorService.InteriorCopy(target,
                 target.x() - global.minX(), target.y() - global.minY(),
                 target.z() - global.minZ(), null));
         if (source != null) copies.add(new InteriorService.InteriorCopy(source,
                 sourceOriginX - global.minX(), sourceOriginY - global.minY(),
                 sourceOriginZ - global.minZ(), null));
-        interiors.copyRegions(combinedRecord, copies);
-        interiors.destroyCell(oldTarget);
-        if (source != null) {
-            repository.remove(source.id());
-            previews.remove(source.id());
-            interiors.destroy(source);
-            if (source.hasPortal() && !sourcePortalAdopted) {
-                clicked.getWorld().dropItemNaturally(clicked.getLocation().add(.5, .5, .5),
-                        items.createPortalSide());
-            }
-        }
         for (JarAssembly.Cell cell : sourceAssembly.cells()) {
             clicked.getWorld().getBlockAt(sourceOriginX + cell.x(), sourceOriginY + cell.y(),
-                            sourceOriginZ + cell.z())
-                    .setType(Material.GLASS, false);
+                            sourceOriginZ + cell.z()).setType(Material.GLASS, false);
         }
         player.getInventory().setItemInMainHand(null);
-        previews.refresh(combinedRecord);
-        player.sendMessage("§aJar attached. Shared interior walls were opened.");
-    }
-
-    private AttachmentPlan findAttachment(JarRecord target, Block clicked, BlockFace face,
-                                          JarAssembly sourceAssembly) {
-        List<JarAssembly.Cell> contacts = sourceAssembly.cells().stream()
-                .filter(cell -> !sourceAssembly.contains(cell.x() - face.getModX(),
-                        cell.y() - face.getModY(), cell.z() - face.getModZ()))
-                .sorted(java.util.Comparator.comparingInt(JarAssembly.Cell::y)
-                        .thenComparingInt(JarAssembly.Cell::z).thenComparingInt(JarAssembly.Cell::x))
-                .toList();
-        int maximum = Math.max(1, plugin.getConfig().getInt("jar.max-combined-size", 9));
-        for (JarAssembly.Cell contact : contacts) {
-            int sourceOriginX = clicked.getX() + face.getModX() - contact.x();
-            int sourceOriginY = clicked.getY() + face.getModY() - contact.y();
-            int sourceOriginZ = clicked.getZ() + face.getModZ() - contact.z();
-            List<JarPart> globalParts = new ArrayList<>();
-            target.parts().forEach(part -> globalParts.add(part.translated(target.x(), target.y(), target.z())));
-            sourceAssembly.parts().forEach(part -> globalParts.add(part.translated(
-                    sourceOriginX, sourceOriginY, sourceOriginZ)));
-            JarAssembly global;
-            try {
-                global = new JarAssembly(globalParts);
-            } catch (IllegalArgumentException exception) {
-                continue;
+        previews.remove(target.id());
+        boolean returnPortalSide = source != null && source.hasPortal() && !sourcePortalAdopted;
+        interiors.copyRegionsAsync(combinedRecord, copies, () -> {
+            interiors.destroyCell(target);
+            if (source != null) {
+                repository.remove(source.id());
+                previews.remove(source.id());
+                interiors.destroy(source);
             }
-            if (target.hasPortal()) {
-                int portalX = target.x() + target.doorX();
-                int portalY = target.y() + target.doorY();
-                int portalZ = target.z() + target.doorZ();
-                if (global.contains(portalX + target.door().getModX(), portalY,
-                        portalZ + target.door().getModZ())) continue;
-            }
-            JarAssembly combined = global.normalized();
-            if (combined.width() > maximum || combined.height() > maximum || combined.depth() > maximum
-                    || combined.width() * target.scale() > interiors.maximumInteriorSize()
-                    || combined.height() * target.scale() > interiors.maximumInteriorHeight()
-                    || combined.depth() * target.scale() > interiors.maximumInteriorSize()) continue;
-            boolean clear = true;
-            for (JarAssembly.Cell cell : sourceAssembly.cells()) {
-                int destinationY = sourceOriginY + cell.y();
-                if (destinationY < clicked.getWorld().getMinHeight()
-                        || destinationY >= clicked.getWorld().getMaxHeight()) {
-                    clear = false;
-                    break;
-                }
-                Block destination = clicked.getWorld().getBlockAt(
-                        sourceOriginX + cell.x(), destinationY, sourceOriginZ + cell.z());
-                if (!destination.isEmpty() || repository.at(destination.getLocation()).isPresent()) {
-                    clear = false;
-                    break;
-                }
-            }
-            if (clear) return new AttachmentPlan(sourceOriginX, sourceOriginY, sourceOriginZ, global);
+            releaseCombination(target.id(), sourceId);
+            previews.refresh(combinedRecord);
+        });
+        if (returnPortalSide) {
+            clicked.getWorld().dropItemNaturally(clicked.getLocation().add(.5, .5, .5),
+                    items.createPortalSide());
         }
-        return null;
+        player.sendMessage("§aJar attached. Its interior is being prepared in the background.");
     }
 
-    private record AttachmentPlan(int sourceOriginX, int sourceOriginY, int sourceOriginZ,
-                                  JarAssembly global) {}
+    private boolean attachmentSpaceClear(Block clicked, JarAssembly sourceAssembly,
+                                         CombinationPlanner.AttachmentCandidate candidate) {
+        for (JarAssembly.Cell cell : sourceAssembly.cells()) {
+            int destinationY = candidate.sourceOriginY() + cell.y();
+            if (destinationY < clicked.getWorld().getMinHeight()
+                    || destinationY >= clicked.getWorld().getMaxHeight()) return false;
+            Block destination = clicked.getWorld().getBlockAt(candidate.sourceOriginX() + cell.x(),
+                    destinationY, candidate.sourceOriginZ() + cell.z());
+            if (!destination.isEmpty()) return false;
+        }
+        return true;
+    }
 
     private void detachPart(Player player, JarRecord oldJar, Block clicked) {
         int cellX = clicked.getX() - oldJar.x(), cellY = clicked.getY() - oldJar.y();
         int cellZ = clicked.getZ() - oldJar.z();
-        JarPart detachedPart = oldJar.assembly().partAt(cellX, cellY, cellZ);
-        if (detachedPart == null) return;
-
-        List<JarPart> remainingParts = new ArrayList<>(oldJar.parts());
-        remainingParts.remove(detachedPart);
-        JarAssembly remainingRaw = new JarAssembly(remainingParts);
-        int shiftX = remainingRaw.minX(), shiftY = remainingRaw.minY(), shiftZ = remainingRaw.minZ();
-        JarAssembly remaining = remainingRaw.normalized();
-        JarAssembly detached = JarAssembly.cuboid(detachedPart.width(), detachedPart.height(), detachedPart.depth());
-        Set<JarAssembly.Cell> detachedCells = new java.util.HashSet<>();
-        for (int x = detachedPart.x(); x < detachedPart.x() + detachedPart.width(); x++) {
-            for (int y = detachedPart.y(); y < detachedPart.y() + detachedPart.height(); y++) {
-                for (int z = detachedPart.z(); z < detachedPart.z() + detachedPart.depth(); z++) {
-                    detachedCells.add(new JarAssembly.Cell(x, y, z));
-                }
-            }
+        if (!reserveCombination(oldJar.id(), null)) {
+            player.sendMessage("§cThat jar is already being changed.");
+            return;
         }
-        Set<JarAssembly.Cell> remainingCells = new java.util.HashSet<>(oldJar.assembly().cells());
-        remainingCells.removeAll(detachedCells);
+        plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
+            CombinationPlanner.DetachmentPlan plan;
+            try {
+                plan = CombinationPlanner.detach(oldJar, cellX, cellY, cellZ);
+            } catch (RuntimeException exception) {
+                plugin.getLogger().warning("Could not calculate jar detachment: " + exception.getMessage());
+                plan = null;
+            }
+            CombinationPlanner.DetachmentPlan completed = plan;
+            plugin.getServer().getScheduler().runTask(plugin,
+                    () -> applyDetachment(player, oldJar, clicked, completed));
+        });
+    }
 
-        boolean portalDetached = oldJar.hasPortal()
-                && detachedCells.contains(new JarAssembly.Cell(oldJar.doorX(), oldJar.doorY(), oldJar.doorZ()));
-        BlockFace remainingPortal = oldJar.hasPortal() && !portalDetached ? oldJar.door() : null;
-        int remainingPortalX = remainingPortal == null ? 0 : oldJar.doorX() - shiftX;
-        int remainingPortalY = remainingPortal == null ? 0 : oldJar.doorY() - shiftY;
-        int remainingPortalZ = remainingPortal == null ? 0 : oldJar.doorZ() - shiftZ;
-        BlockFace detachedPortal = portalDetached ? oldJar.door() : null;
-        int detachedPortalX = detachedPortal == null ? 0 : oldJar.doorX() - detachedPart.x();
-        int detachedPortalY = detachedPortal == null ? 0 : oldJar.doorY() - detachedPart.y();
-        int detachedPortalZ = detachedPortal == null ? 0 : oldJar.doorZ() - detachedPart.z();
-
+    private void applyDetachment(Player player, JarRecord oldJar, Block clicked,
+                                 CombinationPlanner.DetachmentPlan plan) {
+        if (plan == null || !oldJar.equals(repository.byId(oldJar.id()).orElse(null))) {
+            releaseCombination(oldJar.id(), null);
+            return;
+        }
+        JarPart detachedPart = plan.detachedPart();
         JarRecord remainingRecord = repository.replaceInNewCell(oldJar, oldJar.world(),
-                oldJar.x() + shiftX, oldJar.y() + shiftY, oldJar.z() + shiftZ,
-                remainingPortal, remainingPortalX, remainingPortalY, remainingPortalZ, remaining, true);
+                oldJar.x() + plan.shiftX(), oldJar.y() + plan.shiftY(), oldJar.z() + plan.shiftZ(),
+                plan.remainingPortal(), plan.remainingPortalX(), plan.remainingPortalY(),
+                plan.remainingPortalZ(), plan.remaining(), true);
         JarRecord detachedRecord = repository.createCarried(oldJar.owner(), oldJar.world(),
-                oldJar.x() + detachedPart.x(), oldJar.y() + detachedPart.y(), oldJar.z() + detachedPart.z(),
-                detachedPortal, detachedPortalX, detachedPortalY, detachedPortalZ,
-                oldJar.scale(), detached);
-        interiors.copyRegions(detachedRecord, List.of(new InteriorService.InteriorCopy(
-                oldJar, -detachedPart.x(), -detachedPart.y(), -detachedPart.z(), detachedCells)));
-        interiors.copyRegions(remainingRecord, List.of(new InteriorService.InteriorCopy(
-                oldJar, -shiftX, -shiftY, -shiftZ, remainingCells)));
-        interiors.destroyCell(oldJar);
+                oldJar.x() + detachedPart.x(), oldJar.y() + detachedPart.y(),
+                oldJar.z() + detachedPart.z(), plan.detachedPortal(), plan.detachedPortalX(),
+                plan.detachedPortalY(), plan.detachedPortalZ(), oldJar.scale(), plan.detached());
 
         Location oldOrigin = oldJar.outsideLocation();
-        for (JarAssembly.Cell cell : detachedCells) {
+        for (JarAssembly.Cell cell : plan.detachedCells()) {
             Block block = oldOrigin.getBlock().getRelative(cell.x(), cell.y(), cell.z());
             block.setType(Material.AIR, false);
             previews.transportBlock(block.getLocation());
         }
-        previews.refresh(remainingRecord);
-        previews.seal(detachedRecord);
+        previews.remove(oldJar.id());
+
+        int[] pendingCopies = {2};
+        Runnable copied = () -> {
+            if (--pendingCopies[0] != 0) return;
+            interiors.destroyCell(oldJar);
+            releaseCombination(oldJar.id(), null);
+            previews.refresh(remainingRecord);
+            previews.seal(detachedRecord);
+        };
+        interiors.copyRegionsAsync(detachedRecord, List.of(new InteriorService.InteriorCopy(
+                oldJar, -detachedPart.x(), -detachedPart.y(), -detachedPart.z(),
+                plan.detachedCells())), copied);
+        interiors.copyRegionsAsync(remainingRecord, List.of(new InteriorService.InteriorCopy(
+                oldJar, -plan.shiftX(), -plan.shiftY(), -plan.shiftZ(),
+                plan.remainingCells())), copied);
         clicked.getWorld().dropItemNaturally(clicked.getLocation(),
                 items.create(detachedRecord.id(), detachedRecord.assembly(), detachedRecord.scale()));
-        player.sendMessage("§aJar part detached.");
+        player.sendMessage("§aJar part detached. Its interior is being prepared in the background.");
+    }
+
+    private boolean reserveCombination(UUID first, UUID second) {
+        if (combinationsInProgress.contains(first)
+                || second != null && combinationsInProgress.contains(second)) return false;
+        combinationsInProgress.add(first);
+        if (second != null) combinationsInProgress.add(second);
+        return true;
+    }
+
+    private void releaseCombination(UUID first, UUID second) {
+        combinationsInProgress.remove(first);
+        if (second != null) {
+            combinationsInProgress.remove(second);
+            JarRecord source = repository.byId(second).orElse(null);
+            if (source != null && !source.placed()) checkDeletedNextTick(second);
+        }
     }
 
     private boolean canPlaceFootprint(Block origin, JarAssembly assembly, Block alreadyPlaced) {

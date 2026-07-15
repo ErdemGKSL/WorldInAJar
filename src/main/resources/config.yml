@@ -18,6 +18,10 @@ interior:
   # Keep this at least jar.scale * jar.max-combined-size.
   allocation-stride: 320
   mob-spawning: true
+  # Combination world edits stay on the server thread but are distributed across ticks.
+  # The runner stops when either limit is reached, whichever happens first.
+  combination-blocks-per-tick: 2048
+  combination-max-millis-per-tick: 2.0
 
 preview:
   # Viewer visibility and moving player markers are updated on this interval.
