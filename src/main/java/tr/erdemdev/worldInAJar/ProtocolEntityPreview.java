@@ -223,6 +223,13 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
     }
 
     @Override
+    public void removeSource(UUID sourceId) {
+        for (MirrorKey key : new ArrayList<>(mirrors.keySet())) {
+            if (key.sourceId.equals(sourceId)) removeMirror(key);
+        }
+    }
+
+    @Override
     public void forget(UUID playerId) {
         for (Mirror mirror : mirrors.values()) mirror.forget(playerId);
     }

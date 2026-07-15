@@ -21,6 +21,7 @@ import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerRespawnEvent;
+import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.event.weather.ThunderChangeEvent;
 import org.bukkit.event.weather.WeatherChangeEvent;
 import org.bukkit.inventory.EquipmentSlot;
@@ -44,8 +45,14 @@ public final class JarListener implements Listener {
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onPlace(BlockPlaceEvent event) {
+        if (event instanceof BlockMultiPlaceEvent multiPlace) {
+            for (org.bukkit.block.BlockState state : multiPlace.getReplacedBlockStates()) {
+                previews.transportBlock(state.getLocation());
+            }
+        } else {
+            previews.transportBlock(event.getBlockPlaced().getLocation());
+        }
         if (!items.isJar(event.getItemInHand())) {
-            invalidateContaining(event.getBlockPlaced().getLocation());
             return;
         }
         BlockFace door = horizontalOpposite(event.getPlayer().getFacing());
@@ -78,7 +85,6 @@ public final class JarListener implements Listener {
                 event.getPlayer().sendMessage("§cThe glass boundary of a jar cannot be broken.");
                 return;
             }
-            invalidateContaining(event.getBlock().getLocation());
             return;
         }
         event.setDropItems(false);
@@ -91,6 +97,11 @@ public final class JarListener implements Listener {
             previews.seal(carried);
             event.getBlock().getWorld().dropItemNaturally(event.getBlock().getLocation(), items.create(current.id()));
         });
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onBreakPreview(BlockBreakEvent event) {
+        previews.transportBlock(event.getBlock().getLocation());
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -139,7 +150,15 @@ public final class JarListener implements Listener {
 
     @EventHandler(priority = EventPriority.MONITOR)
     public void onRespawn(PlayerRespawnEvent event) {
+        previews.preparePlayerTransition(event.getPlayer());
         interiors.syncSession(event.getPlayer(), event.getRespawnLocation(), repository);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onTeleport(PlayerTeleportEvent event) {
+        if (event.getFrom().getWorld() != event.getTo().getWorld()) {
+            previews.preparePlayerTransition(event.getPlayer());
+        }
     }
 
     @EventHandler
@@ -204,12 +223,6 @@ public final class JarListener implements Listener {
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onPistonRetract(BlockPistonRetractEvent event) { if (event.getBlocks().stream().anyMatch(b -> repository.at(b.getLocation()).isPresent())) event.setCancelled(true); }
-
-    private void invalidateContaining(org.bukkit.Location location) {
-        for (JarRecord jar : repository.all()) {
-            if (interiors.contains(jar, location)) { previews.invalidate(jar); return; }
-        }
-    }
 
     private void checkDeletedNextTick(UUID id) {
         plugin.getServer().getScheduler().runTask(plugin, () -> {

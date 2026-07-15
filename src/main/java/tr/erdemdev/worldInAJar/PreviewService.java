@@ -20,6 +20,7 @@ import java.util.function.Predicate;
 public final class PreviewService {
     private static final float FRONT_PORTAL_INWARD = .2f;
     private static final float BACK_PORTAL_INWARD = -.1f;
+    private static final float SEALED_BACKING_OUTWARD = .55f;
     private static final double PORTAL_SIDE_SWITCH_OFFSET = .1;
     private static final int EXTERIOR_BLOCKS = 1;
     private static final int INTERIOR_BLOCKS = 2;
@@ -40,7 +41,9 @@ public final class PreviewService {
     private EntityPreviewBackend entityBackend;
     private JarRepository repository;
     private int taskId = -1;
-    private long ticks;
+    private int blockRefreshTaskId = -1;
+    private long updatePeriodTicks = 1L;
+    private long blockRefreshElapsedTicks;
 
     public PreviewService(JavaPlugin plugin, InteriorService interiors) {
         this.plugin = plugin;
@@ -60,8 +63,9 @@ public final class PreviewService {
         });
         rebuildRoutes();
         removeOrphans();
-        long period = Math.max(1L, plugin.getConfig().getLong("preview.update-ticks", 5L));
-        taskId = plugin.getServer().getScheduler().scheduleSyncRepeatingTask(plugin, this::tick, 1L, period);
+        updatePeriodTicks = Math.max(1L, plugin.getConfig().getLong("preview.update-ticks", 5L));
+        taskId = plugin.getServer().getScheduler().scheduleSyncRepeatingTask(
+                plugin, this::tick, 1L, updatePeriodTicks);
     }
 
     public void stop() {
@@ -70,13 +74,16 @@ public final class PreviewService {
         entityBackend = null;
         if (taskId != -1) plugin.getServer().getScheduler().cancelTask(taskId);
         taskId = -1;
+        if (blockRefreshTaskId != -1) plugin.getServer().getScheduler().cancelTask(blockRefreshTaskId);
+        blockRefreshTaskId = -1;
         if (router != null) router.shutdownNow();
         router = null;
         pendingBlocks.clear(); pendingPlayers.clear(); routedBlocks.clear(); routedPlayers.clear();
         routeScheduled.set(false); applyScheduled.set(false); routes = List.of();
         for (JarScene scene : scenes.values()) scene.removeAll();
         scenes.clear();
-        ticks = 0;
+        updatePeriodTicks = 1L;
+        blockRefreshElapsedTicks = 0L;
     }
 
     public void invalidate(JarRecord jar) {
@@ -146,10 +153,17 @@ public final class PreviewService {
         }
     }
 
+    public void preparePlayerTransition(Player player) {
+        if (entityBackend != null) entityBackend.removeSource(player.getUniqueId());
+    }
+
     private void tick() {
-        ticks++;
         interiors.pruneSessions(repository);
         rebuildRoutes();
+        long blockPeriod = Math.max(1L, plugin.getConfig().getLong("preview.block-refresh-ticks", 100L));
+        blockRefreshElapsedTicks += updatePeriodTicks;
+        boolean reconcileBlocks = blockRefreshElapsedTicks >= blockPeriod;
+        if (reconcileBlocks) blockRefreshElapsedTicks %= blockPeriod;
         Set<UUID> valid = new HashSet<>();
         for (JarRecord jar : repository.all()) {
             valid.add(jar.id());
@@ -173,19 +187,20 @@ public final class PreviewService {
                 remove(jar.id());
                 continue;
             }
-            JarScene scene = scenes.computeIfAbsent(jar.id(), ignored -> new JarScene(jar));
+            JarScene scene = scenes.get(jar.id());
+            boolean newScene = scene == null;
+            if (newScene) {
+                scene = new JarScene(jar);
+                scenes.put(jar.id(), scene);
+            }
             if (!scene.jar.equals(jar)) {
                 scene.removeAll();
                 scene = new JarScene(jar);
                 scenes.put(jar.id(), scene);
+                newScene = true;
             }
             updateViewers(scene);
-            int blockPeriod = Math.max(1, plugin.getConfig().getInt("preview.block-refresh-ticks", 100));
-            boolean reconcileBlocks = ticks % blockPeriod == 0;
-            if (scene.exteriorInvalid || scene.interiorInvalid || reconcileBlocks) {
-                refreshBlocks(scene, scene.exteriorInvalid || reconcileBlocks,
-                        scene.interiorInvalid || reconcileBlocks);
-            }
+            if (newScene || reconcileBlocks) refreshBlocks(scene, true, true);
             updateOccupants(scene);
             updateOutsidePlayers(scene);
             if (entityBackend != null) entityBackend.update(jar, scene.exteriorViewers, scene.interiorViewers);
@@ -269,7 +284,7 @@ public final class PreviewService {
             int exteriorMaximum = plugin.getConfig().getBoolean("preview.exterior.enabled", true)
                     ? bounded("preview.exterior.max-blocks", 2048, 0, 4096) : 0;
             List<InteriorBox> interior = sampleInterior(scene.jar, exteriorMaximum);
-            int exteriorFingerprint = Objects.hash(interior);
+            int exteriorFingerprint = blockFingerprint(interior);
             if (scene.exteriorFingerprint != exteriorFingerprint) {
             if (interior.size() >= exteriorMaximum && exteriorMaximum > 0 && scene.exteriorFingerprint != exteriorFingerprint)
                 plugin.getLogger().warning("Jar " + scene.jar.id() + " has more visible blocks than preview.exterior.max-blocks ("
@@ -295,7 +310,7 @@ public final class PreviewService {
             int radius = bounded("preview.interior.outside-radius", 6, 1, 24);
             List<OutsideSample> outside = sampleOutside(scene.jar, radius, outsideMaximum);
             BlockData floor = scene.jar.outsideLocation().clone().subtract(0, 1, 0).getBlock().getBlockData();
-            int interiorFingerprint = Objects.hash(outside, floor.getAsString(), radius);
+            int interiorFingerprint = blockFingerprint(outside, floor, radius);
             if (scene.interiorFingerprint != interiorFingerprint) {
             List<VirtualBlockDisplay> stale = new ArrayList<>(scene.interiorBlocks);
             scene.interiorBlocks.clear();
@@ -320,10 +335,11 @@ public final class PreviewService {
         List<InteriorBox> result = new ArrayList<>();
         for (int y = 0; y < scale - 1; y++) {
             for (int x = 1; x < scale - 1; x++) for (int z = 1; z < scale - 1; z++) {
-                Material material = world.getBlockAt(cell.minX() + x, cell.minY() + y, cell.minZ() + z).getType();
-                if (!renderable(material, false)
+                BlockData blockData = world.getBlockAt(cell.minX() + x, cell.minY() + y,
+                        cell.minZ() + z).getBlockData();
+                if (!renderable(blockData.getMaterial(), false)
                         || !exposed(world, cell.minX() + x, cell.minY() + y, cell.minZ() + z)) continue;
-                result.add(new InteriorBox(x, y, z, 1, 1, 1, material));
+                result.add(new InteriorBox(x, y, z, 1, 1, 1, blockData));
                 if (result.size() >= maximum) return result;
             }
         }
@@ -368,6 +384,24 @@ public final class PreviewService {
         });
     }
 
+    private static int blockFingerprint(List<InteriorBox> blocks) {
+        int fingerprint = 1;
+        for (InteriorBox block : blocks) {
+            fingerprint = 31 * fingerprint + Objects.hash(
+                    block.x, block.y, block.z, block.blockData.getAsString());
+        }
+        return fingerprint;
+    }
+
+    private static int blockFingerprint(List<OutsideSample> blocks, BlockData floor, int radius) {
+        int fingerprint = Objects.hash(floor.getAsString(), radius);
+        for (OutsideSample block : blocks) {
+            fingerprint = 31 * fingerprint + Objects.hash(
+                    block.dx, block.dy, block.dz, block.blockData.getAsString());
+        }
+        return fingerprint;
+    }
+
     private static boolean exposed(World world, int x, int y, int z) {
         return !world.getBlockAt(x + 1, y, z).getType().isOccluding() || !world.getBlockAt(x - 1, y, z).getType().isOccluding()
                 || !world.getBlockAt(x, y + 1, z).getType().isOccluding() || !world.getBlockAt(x, y - 1, z).getType().isOccluding()
@@ -385,7 +419,7 @@ public final class PreviewService {
         // Sub-pixel shrink so touching boxes (and the glass faces) never share a plane and z-fight.
         float epsilon = 0.0005f;
         for (InteriorBox box : boxes) {
-            VirtualBlockDisplay display = new VirtualBlockDisplay(origin, box.material.createBlockData(), new Matrix4f()
+            VirtualBlockDisplay display = new VirtualBlockDisplay(origin, box.blockData, new Matrix4f()
                     .translation(-.5f + box.x * unit + epsilon, box.y * unit + epsilon, -.5f + box.z * unit + epsilon)
                     .scale(box.sx * unit - 2 * epsilon, box.sy * unit - 2 * epsilon, box.sz * unit - 2 * epsilon));
             scene.exteriorBlocks.add(display);
@@ -482,18 +516,35 @@ public final class PreviewService {
                 cell.minY() + half, cell.minZ() + half);
         BlockData black = Material.BLACK_CONCRETE.createBlockData();
 
-        spawnSurface(scene, center, black, new Matrix4f().translation(-half, -half, -half).scale(1, scale, scale));
-        spawnSurface(scene, center, black, new Matrix4f().translation(half - 1, -half, -half).scale(1, scale, scale));
-        spawnSurface(scene, center, black, new Matrix4f().translation(-half, -half, -half).scale(scale, scale, 1));
-        spawnSurface(scene, center, black, new Matrix4f().translation(-half, -half, half - 1).scale(scale, scale, 1));
+        for (org.bukkit.block.BlockFace face : List.of(org.bukkit.block.BlockFace.WEST,
+                org.bukkit.block.BlockFace.EAST, org.bukkit.block.BlockFace.NORTH,
+                org.bukkit.block.BlockFace.SOUTH)) {
+            spawnSurface(scene, center, black, interiorWallTransformation(face, half, scale,
+                    face == scene.jar.door() ? SEALED_BACKING_OUTWARD : 0f));
+        }
         spawnSurface(scene, center, black, new Matrix4f().translation(-half, -half, -half).scale(scale, 1, scale));
         spawnSurface(scene, center, black, new Matrix4f().translation(-half, half - 1, -half).scale(scale, 1, scale));
+        spawnSurface(scene, center, portalData(scene.jar.door()),
+                interiorWallTransformation(scene.jar.door(), half, scale, 0f));
 
         showTo(scene.interiorViewers, scene.interiorBlocks);
         removeEntities(stale, scene.interiorViewers);
         scene.sealed = true;
         scene.exteriorInvalid = false;
         scene.interiorInvalid = false;
+    }
+
+    private static Matrix4f interiorWallTransformation(org.bukkit.block.BlockFace face,
+                                                        float half, int scale, float outward) {
+        float x = -half;
+        float z = -half;
+        if (face == org.bukkit.block.BlockFace.EAST) x = half - 1;
+        if (face == org.bukkit.block.BlockFace.SOUTH) z = half - 1;
+        x += face.getModX() * outward;
+        z += face.getModZ() * outward;
+        Matrix4f transformation = new Matrix4f().translation(x, -half, z);
+        return face == org.bukkit.block.BlockFace.NORTH || face == org.bukkit.block.BlockFace.SOUTH
+                ? transformation.scale(scale, scale, 1) : transformation.scale(1, scale, scale);
     }
 
     private void spawnSurface(JarScene scene, Location center, BlockData blockData, Matrix4f transformation) {
@@ -664,7 +715,7 @@ public final class PreviewService {
         List<JarRoute> snapshots = new ArrayList<>();
         for (JarRecord jar : repository.all()) {
             Location outside = jar.outsideLocation();
-            if (outside == null) continue;
+            if (!jar.placed() || outside == null) continue;
             CellLayout.Cell cell = interiors.cell(jar);
             snapshots.add(new JarRoute(jar.id(), outside.getWorld().getUID(), outside.getBlockX(),
                     outside.getBlockY(), outside.getBlockZ(), radius, interiorWorld,
@@ -700,6 +751,7 @@ public final class PreviewService {
     private void scheduleApply() {
         if (!running || !applyScheduled.compareAndSet(false, true)) return;
         plugin.getServer().getScheduler().runTask(plugin, () -> {
+            boolean blocksChanged = false;
             try {
                 for (Map.Entry<UUID, Integer> entry : new HashMap<>(routedBlocks).entrySet()) {
                     if (!routedBlocks.remove(entry.getKey(), entry.getValue())) continue;
@@ -707,6 +759,7 @@ public final class PreviewService {
                     if (scene == null) continue;
                     if ((entry.getValue() & EXTERIOR_BLOCKS) != 0) scene.exteriorInvalid = true;
                     if ((entry.getValue() & INTERIOR_BLOCKS) != 0) scene.interiorInvalid = true;
+                    blocksChanged = true;
                 }
                 for (UUID playerId : new HashSet<>(routedPlayers)) {
                     if (!routedPlayers.remove(playerId)) continue;
@@ -715,12 +768,34 @@ public final class PreviewService {
                 }
             } finally {
                 applyScheduled.set(false);
+                if (blocksChanged) scheduleBlockRefresh();
                 if (!routedBlocks.isEmpty() || !routedPlayers.isEmpty()) scheduleApply();
             }
         });
     }
 
-    private record InteriorBox(int x, int y, int z, int sx, int sy, int sz, Material material) {}
+    private void scheduleBlockRefresh() {
+        if (!running || blockRefreshTaskId != -1) return;
+        long configuredTicks = Math.max(1L, plugin.getConfig().getLong("preview.block-update-ticks", 1L));
+        if (configuredTicks == 1L) {
+            refreshInvalidBlocks();
+            return;
+        }
+        blockRefreshTaskId = plugin.getServer().getScheduler().scheduleSyncDelayedTask(plugin, () -> {
+            blockRefreshTaskId = -1;
+            refreshInvalidBlocks();
+        }, configuredTicks - 1L);
+    }
+
+    private void refreshInvalidBlocks() {
+        if (!running) return;
+        for (JarScene scene : scenes.values()) {
+            if (scene.sealed || (!scene.exteriorInvalid && !scene.interiorInvalid)) continue;
+            refreshBlocks(scene, scene.exteriorInvalid, scene.interiorInvalid);
+        }
+    }
+
+    private record InteriorBox(int x, int y, int z, int sx, int sy, int sz, BlockData blockData) {}
     private record OutsideSample(int dx, int dy, int dz, BlockData blockData) {}
     private record OutsideOffset(int dx, int dy, int dz, int distanceSquared) {}
     private record BlockRequest(UUID world, int x, int y, int z) {}

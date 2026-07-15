@@ -9,7 +9,7 @@ jar:
 interior:
   world: world_in_a_jar
   base-y: 64
-  cell-gap: 8
+  cell-gap: 24
   # Fixed allocation spacing prevents cells created under different scale settings overlapping.
   # Keep this larger than the maximum allowed scale (256).
   allocation-stride: 320
@@ -18,7 +18,11 @@ interior:
 preview:
   # Viewer visibility and moving player markers are updated on this interval.
   update-ticks: 5
+  # Delay for event-driven block preview updates. 1 refreshes on the next server tick.
+  # Nearby changes are coalesced into one refresh to keep rapid building responsive.
+  block-update-ticks: 1
   # Block scenes use fingerprints and are only rebuilt when sampled block data changes.
+  # This slower full scan catches block changes that do not emit a handled place/break event.
   block-refresh-ticks: 100
 
   exterior:
