@@ -14,6 +14,7 @@ import net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket;
 import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket;
 import net.minecraft.network.protocol.game.ClientboundSetEntityMotionPacket;
 import net.minecraft.network.protocol.game.ClientboundSetEquipmentPacket;
+import net.minecraft.network.protocol.game.ClientboundSetPlayerTeamPacket;
 import net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundUpdateAttributesPacket;
 import net.minecraft.server.level.ChunkMap;
@@ -25,6 +26,9 @@ import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.scores.PlayerTeam;
+import net.minecraft.world.scores.Scoreboard;
+import net.minecraft.world.scores.Team;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.craftbukkit.entity.CraftEntity;
@@ -214,22 +218,37 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
     private final class Mirror {
         private final int id = IDS.getAndDecrement();
         private final UUID uuid;
+        private final UUID sourceUuid;
+        private final String playerName;
+        private final PlayerTeam hiddenNameTeam;
         private final Set<UUID> viewers = new HashSet<>();
+        private VirtualNametag nametag;
         private int sourceEntityId;
 
         private Mirror(Entity source) {
             this.uuid = source instanceof Player ? source.getUniqueId() : UUID.randomUUID();
+            this.sourceUuid = source.getUniqueId();
+            this.playerName = source instanceof Player player ? player.getName() : null;
+            this.hiddenNameTeam = playerName == null ? null : hiddenNameTeam(playerName);
             this.sourceEntityId = source.getEntityId();
         }
 
         private void update(Entity source, Location location, double scale, Collection<Player> desired) {
             sourceEntityId = source.getEntityId();
+            double renderScale = renderScale(source, scale);
+            Location labelLocation = null;
+            if (playerName != null) {
+                labelLocation = nametagLocation(source, location, renderScale);
+                if (nametag == null) {
+                    nametag = new VirtualNametag(labelLocation, playerName, (float) renderScale);
+                }
+            }
             Set<UUID> desiredIds = new HashSet<>();
             for (Player viewer : desired) desiredIds.add(viewer.getUniqueId());
             for (UUID viewerId : new HashSet<>(viewers)) {
                 if (desiredIds.contains(viewerId)) continue;
                 Player viewer = Bukkit.getPlayer(viewerId);
-                if (viewer != null) send(viewer, new ClientboundRemoveEntitiesPacket(id));
+                if (viewer != null) destroy(viewer);
                 viewers.remove(viewerId);
             }
             for (Player viewer : desired) {
@@ -238,7 +257,10 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
                 }
             }
             for (Player viewer : desired) {
-                if (viewers.contains(viewer.getUniqueId())) syncState(viewer, source, location, scale);
+                if (viewers.contains(viewer.getUniqueId())) syncState(viewer, source, location, scale, renderScale);
+            }
+            if (nametag != null && labelLocation != null) {
+                nametag.update(labelLocation, (float) renderScale, online(viewers));
             }
         }
 
@@ -248,13 +270,17 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
             if (tracked == null) return false;
             Packet<ClientGamePacketListener> nativePacket = handle.getAddEntityPacket(tracked.serverEntity);
             if (!(nativePacket instanceof ClientboundAddEntityPacket original)) return false;
+            if (hiddenNameTeam != null) {
+                send(viewer, ClientboundSetPlayerTeamPacket.createAddOrModifyPacket(hiddenNameTeam, true));
+            }
             send(viewer, new ClientboundAddEntityPacket(id, uuid, location.getX(), location.getY(), location.getZ(),
                     location.getPitch(), location.getYaw(), handle.getType(), original.getData(), Vec3.ZERO,
                     location.getYaw()));
+            if (nametag != null) nametag.spawn(viewer);
             return true;
         }
 
-        private void syncState(Player viewer, Entity source, Location location, double scale) {
+        private void syncState(Player viewer, Entity source, Location location, double scale, double renderScale) {
             net.minecraft.world.entity.Entity handle = ((CraftEntity) source).getHandle();
             send(viewer, new ClientboundSetEntityDataPacket(id, handle.getEntityData().packAll()));
             send(viewer, ClientboundTeleportEntityPacket.teleport(id,
@@ -265,12 +291,31 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
                 Collection<AttributeInstance> attributes = living.getAttributes().getSyncableAttributes();
                 if (!attributes.isEmpty()) send(viewer, new ClientboundUpdateAttributesPacket(id, attributes));
                 AttributeInstance scaled = new AttributeInstance(Attributes.SCALE, ignored -> {});
-                AttributeInstance sourceScale = living.getAttribute(Attributes.SCALE);
-                double sourceValue = sourceScale == null ? 1.0 : sourceScale.getValue();
-                scaled.setBaseValue(Math.max(.0625, Math.min(16.0, sourceValue * scale)));
+                scaled.setBaseValue(renderScale);
                 send(viewer, new ClientboundUpdateAttributesPacket(id, List.of(scaled)));
                 send(viewer, equipment(living));
             }
+        }
+
+        private PlayerTeam hiddenNameTeam(String entry) {
+            Scoreboard scoreboard = new Scoreboard();
+            PlayerTeam team = scoreboard.addPlayerTeam("wiaj" + Integer.toUnsignedString(id, 36));
+            team.setNameTagVisibility(Team.Visibility.NEVER);
+            scoreboard.addPlayerToTeam(entry, team);
+            return team;
+        }
+
+        private double renderScale(Entity source, double worldScale) {
+            net.minecraft.world.entity.Entity handle = ((CraftEntity) source).getHandle();
+            double sourceScale = handle instanceof LivingEntity living ? living.getScale() : 1.0;
+            return Math.max(.0625, Math.min(16.0, sourceScale * worldScale));
+        }
+
+        private Location nametagLocation(Entity source, Location feet, double renderScale) {
+            net.minecraft.world.entity.Entity handle = ((CraftEntity) source).getHandle();
+            double sourceScale = handle instanceof LivingEntity living ? living.getScale() : 1.0;
+            double baseHeight = handle.getBbHeight() / Math.max(.0625, sourceScale);
+            return feet.clone().add(0, (baseHeight + .3) * renderScale, 0);
         }
 
         private ClientboundSetEquipmentPacket equipment(LivingEntity living) {
@@ -285,9 +330,23 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
         private void destroyAll() {
             for (UUID viewerId : viewers) {
                 Player viewer = Bukkit.getPlayer(viewerId);
-                if (viewer != null) send(viewer, new ClientboundRemoveEntitiesPacket(id));
+                if (viewer != null) destroy(viewer);
             }
             viewers.clear();
+        }
+
+        private void destroy(Player viewer) {
+            send(viewer, new ClientboundRemoveEntitiesPacket(id));
+            if (nametag != null) nametag.destroy(viewer);
+            if (hiddenNameTeam == null) return;
+            send(viewer, ClientboundSetPlayerTeamPacket.createRemovePacket(hiddenNameTeam));
+            Player source = Bukkit.getPlayer(sourceUuid);
+            if (source == null) return;
+            PlayerTeam realTeam = ((CraftEntity) source).getHandle().getTeam();
+            if (realTeam != null) {
+                send(viewer, ClientboundSetPlayerTeamPacket.createPlayerPacket(realTeam, playerName,
+                        ClientboundSetPlayerTeamPacket.Action.ADD));
+            }
         }
     }
 

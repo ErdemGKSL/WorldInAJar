@@ -134,6 +134,7 @@ final class VirtualBlockDisplay extends VirtualEntity {
 
 final class VirtualNametag extends VirtualEntity {
     private final Display.TextDisplay display;
+    private float scale;
 
     VirtualNametag(Location location, String name, float scale) {
         this(new Display.TextDisplay(EntityType.TEXT_DISPLAY,
@@ -143,6 +144,7 @@ final class VirtualNametag extends VirtualEntity {
     private VirtualNametag(Display.TextDisplay display, Location location, String name, float scale) {
         super(display, location);
         this.display = display;
+        this.scale = scale;
         display.setText(net.minecraft.network.chat.Component.literal(name));
         display.setTransformation(new Transformation(new Matrix4f().scale(scale)));
         display.setBillboardConstraints(Display.BillboardConstraints.CENTER);
@@ -154,6 +156,15 @@ final class VirtualNametag extends VirtualEntity {
 
     void update(Location location, Collection<Player> viewers) {
         positionSync(viewers, location, 0f, Vec3.ZERO, false);
+    }
+
+    void update(Location location, float scale, Collection<Player> viewers) {
+        if (this.scale != scale) {
+            this.scale = scale;
+            display.setTransformation(new Transformation(new Matrix4f().scale(scale)));
+            metadata(viewers);
+        }
+        update(location, viewers);
     }
 }
 
