@@ -1,6 +1,7 @@
 package tr.erdemdev.worldInAJar;
 
 import org.bukkit.*;
+import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Entity;
@@ -244,7 +245,9 @@ public final class InteriorService {
     public boolean isClogged(JarRecord jar) {
         Location doorBlock = jar.doorBlockLocation();
         if (!jar.placed() || doorBlock == null || doorBlock.getBlock().getType() != Material.GLASS) return true;
-        return !doorBlock.clone().add(jar.door().getModX(), 0, jar.door().getModZ()).getBlock().isPassable();
+        Block outside = doorBlock.getBlock().getRelative(jar.door());
+        return DoorwayCollision.blocksPortal(
+                outside.getCollisionShape().getBoundingBoxes(), jar.door());
     }
 
     public List<Player> occupants(JarRecord jar) {
