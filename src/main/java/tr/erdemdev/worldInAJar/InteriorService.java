@@ -31,7 +31,7 @@ public final class InteriorService {
     private final long worldWorkNanosPerTick;
     private final Map<UUID, UUID> sessions = new java.util.HashMap<>();
     private final Deque<WorldJob> worldJobs = new ArrayDeque<>();
-    private final Deque<Runnable> pendingOperations = new ArrayDeque<>();
+    private final Deque<PendingOperation> pendingOperations = new ArrayDeque<>();
     private final Set<Integer> processingCells = new HashSet<>();
     private final Set<Integer> readyCells = new HashSet<>();
     private final Map<Integer, List<Runnable>> readinessWaiters = new java.util.HashMap<>();
@@ -100,7 +100,7 @@ public final class InteriorService {
         }, () -> {
             retry.run();
             finishOperation();
-        }));
+        }), retry);
     }
 
     public void ensureBuiltAsync(JarRecord jar, Runnable completion) {
@@ -131,7 +131,7 @@ public final class InteriorService {
         }, () -> {
             retry.run();
             finishOperation();
-        }));
+        }), retry);
     }
 
     private void retryLater(Runnable retry, JarRecord jar, int attempt) {
@@ -418,18 +418,24 @@ public final class InteriorService {
     }
 
     private void enqueueOperation(Runnable starter) {
-        pendingOperations.addLast(starter);
+        enqueueOperation(starter, () -> {});
+    }
+
+    private void enqueueOperation(Runnable starter, Runnable failure) {
+        pendingOperations.addLast(new PendingOperation(starter, failure));
         startNextOperation();
     }
 
     private void startNextOperation() {
         if (operationActive || pendingOperations.isEmpty()) return;
         operationActive = true;
+        PendingOperation operation = pendingOperations.removeFirst();
         try {
-            pendingOperations.removeFirst().run();
+            operation.starter().run();
         } catch (RuntimeException exception) {
             operationActive = false;
             plugin.getLogger().severe("Could not start interior operation: " + exception.getMessage());
+            operation.failure().run();
             startNextOperation();
         }
     }
@@ -561,19 +567,27 @@ public final class InteriorService {
     }
 
     private record ChunkCoordinate(int x, int z) {}
+    private record PendingOperation(Runnable starter, Runnable failure) {}
 
     private final class SequenceJob implements WorldJob {
         private final Deque<WorldJob> stages;
         private final Runnable completion;
+        private final Runnable failure;
         private final Runnable cleanup;
 
         private SequenceJob(Deque<WorldJob> stages, Runnable completion) {
-            this(stages, completion, () -> {});
+            this(stages, completion, () -> {}, () -> {});
         }
 
         private SequenceJob(Deque<WorldJob> stages, Runnable completion, Runnable cleanup) {
+            this(stages, completion, () -> {}, cleanup);
+        }
+
+        private SequenceJob(Deque<WorldJob> stages, Runnable completion,
+                            Runnable failure, Runnable cleanup) {
             this.stages = stages;
             this.completion = completion;
+            this.failure = failure;
             this.cleanup = cleanup;
         }
 
@@ -587,7 +601,10 @@ public final class InteriorService {
             return true;
         }
 
-        @Override public void fail() { cleanup.run(); }
+        @Override public void fail() {
+            try { failure.run(); }
+            finally { cleanup.run(); }
+        }
     }
 
     private final class BoundaryJob implements WorldJob {
@@ -773,6 +790,7 @@ public final class InteriorService {
         private int index;
         private List<Entity> entities;
         private int entityIndex;
+        private int skippedBlocks;
 
         private RegionCopyJob(InteriorCopy copy, JarRecord target,
                               CellLayout.Cell destinationCell) {
@@ -807,7 +825,16 @@ public final class InteriorService {
                 Location destination = new Location(world, destinationCell.minX() + offsetX + x,
                         destinationCell.minY() + offsetY + y, destinationCell.minZ() + offsetZ + z);
                 if (destination.getBlock().getType() != Material.BARRIER) {
-                    block.getState().copy(destination).update(true, false);
+                    try {
+                        block.getState().copy(destination).update(true, false);
+                    } catch (RuntimeException exception) {
+                        skippedBlocks++;
+                        if (skippedBlocks == 1) {
+                            plugin.getLogger().warning("Skipping an interior block that could not be copied at "
+                                    + block.getX() + "," + block.getY() + "," + block.getZ()
+                                    + ": " + exception.getMessage());
+                        }
+                    }
                 }
                 return false;
             }
