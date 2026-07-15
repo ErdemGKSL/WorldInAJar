@@ -20,6 +20,7 @@ public final class JarItems {
     private final NamespacedKey depthKey;
     private final NamespacedKey scaleKey;
     private final NamespacedKey partsKey;
+    private final NamespacedKey partsVersionKey;
     private final NamespacedKey portalSideKey;
 
     public JarItems(JavaPlugin plugin) {
@@ -30,6 +31,7 @@ public final class JarItems {
         depthKey = new NamespacedKey(plugin, "jar_depth");
         scaleKey = new NamespacedKey(plugin, "jar_scale");
         partsKey = new NamespacedKey(plugin, "jar_parts");
+        partsVersionKey = new NamespacedKey(plugin, "jar_parts_version");
         portalSideKey = new NamespacedKey(plugin, "portal_side");
     }
 
@@ -43,8 +45,9 @@ public final class JarItems {
         JarAssembly storedAssembly = assembly;
         ItemStack item = new ItemStack(Material.GLASS);
         item.editMeta(meta -> {
-            String dimensions = storedAssembly.width() + "x" + storedAssembly.depth();
-            meta.displayName(Component.text(storedAssembly.tiles().size() == 1
+            String dimensions = storedAssembly.width() + "x" + storedAssembly.height()
+                    + "x" + storedAssembly.depth();
+            meta.displayName(Component.text(storedAssembly.cells().size() == 1
                     ? "World in a Jar" : "Combined World Jar (" + dimensions + ")"));
             meta.lore(List.of(
                     Component.text(id == null ? "Place to create a miniature world" : "Contains a persistent miniature world"),
@@ -54,13 +57,15 @@ public final class JarItems {
             meta.getPersistentDataContainer().set(widthKey, PersistentDataType.INTEGER, storedAssembly.width());
             meta.getPersistentDataContainer().set(depthKey, PersistentDataType.INTEGER, storedAssembly.depth());
             meta.getPersistentDataContainer().set(scaleKey, PersistentDataType.INTEGER, scale);
-            int[] encoded = new int[storedAssembly.parts().size() * 4];
+            int[] encoded = new int[storedAssembly.parts().size() * 6];
             for (int index = 0; index < storedAssembly.parts().size(); index++) {
                 JarPart part = storedAssembly.parts().get(index);
-                encoded[index * 4] = part.x(); encoded[index * 4 + 1] = part.z();
-                encoded[index * 4 + 2] = part.width(); encoded[index * 4 + 3] = part.depth();
+                encoded[index * 6] = part.x(); encoded[index * 6 + 1] = part.y();
+                encoded[index * 6 + 2] = part.z(); encoded[index * 6 + 3] = part.width();
+                encoded[index * 6 + 4] = part.height(); encoded[index * 6 + 5] = part.depth();
             }
             meta.getPersistentDataContainer().set(partsKey, PersistentDataType.INTEGER_ARRAY, encoded);
+            meta.getPersistentDataContainer().set(partsVersionKey, PersistentDataType.INTEGER, 2);
             if (id != null) meta.getPersistentDataContainer().set(idKey, PersistentDataType.STRING, id.toString());
         });
         return item;
@@ -100,11 +105,25 @@ public final class JarItems {
         if (!isJar(item)) return null;
         ItemMeta meta = item.getItemMeta();
         int[] encoded = meta.getPersistentDataContainer().get(partsKey, PersistentDataType.INTEGER_ARRAY);
-        if (encoded != null && encoded.length > 0 && encoded.length % 4 == 0) {
+        Integer version = meta.getPersistentDataContainer().get(partsVersionKey, PersistentDataType.INTEGER);
+        if (version != null && version >= 2 && encoded != null && encoded.length > 0 && encoded.length % 6 == 0) {
+            java.util.ArrayList<JarPart> parts = new java.util.ArrayList<>();
+            try {
+                for (int index = 0; index < encoded.length; index += 6) {
+                    parts.add(new JarPart(encoded[index], encoded[index + 1], encoded[index + 2],
+                            encoded[index + 3], encoded[index + 4], encoded[index + 5]));
+                }
+                return new JarAssembly(parts).normalized();
+            } catch (IllegalArgumentException ignored) {
+                return null;
+            }
+        }
+        if ((version == null || version < 2) && encoded != null && encoded.length > 0 && encoded.length % 4 == 0) {
             java.util.ArrayList<JarPart> parts = new java.util.ArrayList<>();
             try {
                 for (int index = 0; index < encoded.length; index += 4) {
-                    parts.add(new JarPart(encoded[index], encoded[index + 1], encoded[index + 2], encoded[index + 3]));
+                    parts.add(new JarPart(encoded[index], encoded[index + 1],
+                            encoded[index + 2], encoded[index + 3]));
                 }
                 return new JarAssembly(parts).normalized();
             } catch (IllegalArgumentException ignored) {

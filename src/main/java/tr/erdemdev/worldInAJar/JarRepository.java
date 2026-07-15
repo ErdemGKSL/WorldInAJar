@@ -14,6 +14,9 @@ public final class JarRepository {
     private final JavaPlugin plugin;
     private final File file;
     private final Map<UUID, JarRecord> records = new HashMap<>();
+    private final Map<UUID, JarRecord> portalRecords = new HashMap<>();
+    private final Collection<JarRecord> recordsView = Collections.unmodifiableCollection(records.values());
+    private final Collection<JarRecord> portalRecordsView = Collections.unmodifiableCollection(portalRecords.values());
     private int nextCell;
 
     public JarRepository(JavaPlugin plugin) {
@@ -23,6 +26,7 @@ public final class JarRepository {
 
     public void load() {
         records.clear();
+        portalRecords.clear();
         YamlConfiguration yaml = YamlConfiguration.loadConfiguration(file);
         nextCell = yaml.getInt("next-cell", 0);
         ConfigurationSection jars = yaml.getConfigurationSection("jars");
@@ -41,16 +45,17 @@ public final class JarRepository {
                 BlockFace portalFace = storedFace == null
                         ? BlockFace.valueOf(yaml.getString(path + "door", "NORTH"))
                         : storedFace.equals("NONE") ? null : BlockFace.valueOf(storedFace);
-                JarAssembly.Tile portalTile = portalFace == null ? new JarAssembly.Tile(0, 0)
+                JarAssembly.Cell portalCell = portalFace == null ? new JarAssembly.Cell(0, 0, 0)
                         : yaml.contains(path + "portal-x")
-                        ? new JarAssembly.Tile(yaml.getInt(path + "portal-x"), yaml.getInt(path + "portal-z"))
-                        : JarRecord.defaultPortalTile(assembly, portalFace);
+                        ? new JarAssembly.Cell(yaml.getInt(path + "portal-x"),
+                        yaml.getInt(path + "portal-y", 0), yaml.getInt(path + "portal-z"))
+                        : JarRecord.defaultPortalCell(assembly, portalFace);
                 JarRecord record = new JarRecord(id, UUID.fromString(yaml.getString(path + "owner")),
                         world, x, y, z,
-                        portalFace, portalTile.x(), portalTile.z(),
+                        portalFace, portalCell.x(), portalCell.y(), portalCell.z(),
                         yaml.getInt(path + "cell"), yaml.getInt(path + "scale", 60),
                         parts, placed);
-                records.put(id, record);
+                store(record);
                 nextCell = Math.max(nextCell, record.cell() + 1);
             } catch (RuntimeException exception) {
                 plugin.getLogger().warning("Skipping invalid jar record " + key + ": " + exception.getMessage());
@@ -67,13 +72,15 @@ public final class JarRepository {
             yaml.set(path + "world", record.world());
             yaml.set(path + "x", record.x()); yaml.set(path + "y", record.y()); yaml.set(path + "z", record.z());
             yaml.set(path + "portal-face", record.door() == null ? "NONE" : record.door().name());
-            yaml.set(path + "portal-x", record.doorX()); yaml.set(path + "portal-z", record.doorZ());
+            yaml.set(path + "portal-x", record.doorX()); yaml.set(path + "portal-y", record.doorY());
+            yaml.set(path + "portal-z", record.doorZ());
             yaml.set(path + "cell", record.cell());
             yaml.set(path + "scale", record.scale());
             yaml.set(path + "parts", record.parts().stream().map(part -> {
                 Map<String, Object> values = new LinkedHashMap<>();
-                values.put("x", part.x()); values.put("z", part.z());
-                values.put("width", part.width()); values.put("depth", part.depth());
+                values.put("x", part.x()); values.put("y", part.y()); values.put("z", part.z());
+                values.put("width", part.width()); values.put("height", part.height());
+                values.put("depth", part.depth());
                 return values;
             }).toList());
             yaml.set(path + "placed", record.placed());
@@ -84,40 +91,49 @@ public final class JarRepository {
 
     public JarRecord create(UUID owner, Location location, BlockFace door, int scale, JarAssembly assembly) {
         assembly = assembly.normalized();
-        JarAssembly.Tile portal = JarRecord.defaultPortalTile(assembly, door);
+        JarAssembly.Cell portal = JarRecord.defaultPortalCell(assembly, door);
         JarRecord record = new JarRecord(UUID.randomUUID(), owner, location.getWorld().getName(),
                 location.getBlockX(), location.getBlockY(), location.getBlockZ(),
-                door, portal.x(), portal.z(), nextCell++,
+                door, portal.x(), portal.y(), portal.z(), nextCell++,
                 scale, assembly.normalized().parts(), true);
-        records.put(record.id(), record); save(); return record;
+        store(record); save(); return record;
     }
 
     public JarRecord createCarried(UUID owner, String world, int x, int y, int z,
-                                   BlockFace door, int doorX, int doorZ, int scale, JarAssembly assembly) {
+                                   BlockFace door, int doorX, int doorY, int doorZ,
+                                   int scale, JarAssembly assembly) {
         JarRecord record = new JarRecord(UUID.randomUUID(), owner, world, x, y, z,
-                door, doorX, doorZ, nextCell++,
+                door, doorX, doorY, doorZ, nextCell++,
                 scale, assembly.normalized().parts(), false);
-        records.put(record.id(), record); save(); return record;
+        store(record); save(); return record;
     }
 
     public JarRecord replaceInNewCell(JarRecord previous, String world, int x, int y, int z,
-                                      BlockFace door, int doorX, int doorZ,
+                                      BlockFace door, int doorX, int doorY, int doorZ,
                                       JarAssembly assembly, boolean placed) {
         JarRecord record = new JarRecord(previous.id(), previous.owner(), world, x, y, z,
-                door, doorX, doorZ,
+                door, doorX, doorY, doorZ,
                 nextCell++, previous.scale(), assembly.normalized().parts(), placed);
-        records.put(record.id(), record); save(); return record;
+        store(record); save(); return record;
     }
 
-    public void put(JarRecord record) { records.put(record.id(), record); save(); }
+    public void put(JarRecord record) { store(record); save(); }
     public Optional<JarRecord> remove(UUID id) {
         JarRecord removed = records.remove(id);
+        portalRecords.remove(id);
         if (removed != null) save();
         return Optional.ofNullable(removed);
     }
     public Optional<JarRecord> byId(UUID id) { return Optional.ofNullable(records.get(id)); }
     public Optional<JarRecord> at(Location location) { return records.values().stream().filter(j -> j.isAt(location)).findFirst(); }
-    public Collection<JarRecord> all() { return Collections.unmodifiableCollection(records.values()); }
+    public Collection<JarRecord> all() { return recordsView; }
+    public Collection<JarRecord> withPortals() { return portalRecordsView; }
+
+    private void store(JarRecord record) {
+        records.put(record.id(), record);
+        if (record.hasPortal()) portalRecords.put(record.id(), record);
+        else portalRecords.remove(record.id());
+    }
 
     private boolean isPhysicalJar(String worldName, int x, int y, int z) {
         var world = plugin.getServer().getWorld(worldName);
@@ -127,13 +143,15 @@ public final class JarRepository {
     private List<JarPart> loadParts(YamlConfiguration yaml, String path) {
         List<Map<?, ?>> stored = yaml.getMapList(path + "parts");
         if (stored.isEmpty()) {
-            return List.of(new JarPart(0, 0, Math.max(1, yaml.getInt(path + "width", 1)),
+            return List.of(new JarPart(0, 0, 0,
+                    Math.max(1, yaml.getInt(path + "width", 1)), 1,
                     Math.max(1, yaml.getInt(path + "depth", 1))));
         }
         List<JarPart> parts = new ArrayList<>();
         for (Map<?, ?> values : stored) {
-            parts.add(new JarPart(number(values.get("x")), number(values.get("z")),
-                    number(values.get("width")), number(values.get("depth"))));
+            parts.add(new JarPart(number(values.get("x")), optionalNumber(values.get("y"), 0),
+                    number(values.get("z")), number(values.get("width")),
+                    optionalNumber(values.get("height"), 1), number(values.get("depth"))));
         }
         return new JarAssembly(parts).normalized().parts();
     }
@@ -141,5 +159,9 @@ public final class JarRepository {
     private static int number(Object value) {
         if (value instanceof Number number) return number.intValue();
         throw new IllegalArgumentException("Invalid jar part number: " + value);
+    }
+
+    private static int optionalNumber(Object value, int fallback) {
+        return value == null ? fallback : number(value);
     }
 }

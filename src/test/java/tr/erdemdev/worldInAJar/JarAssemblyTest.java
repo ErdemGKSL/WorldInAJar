@@ -18,9 +18,9 @@ class JarAssemblyTest {
 
         assertEquals(3, assembly.width());
         assertEquals(3, assembly.depth());
-        assertEquals(5, assembly.tiles().size());
-        assertFalse(assembly.contains(1, 1));
-        assertTrue(assembly.contains(2, 2));
+        assertEquals(5, assembly.cells().size());
+        assertFalse(assembly.contains(1, 0, 1));
+        assertTrue(assembly.contains(2, 0, 2));
     }
 
     @Test
@@ -57,17 +57,57 @@ class JarAssemblyTest {
         JarAssembly assembly = new JarAssembly(List.of(
                 new JarPart(0, 0, 2, 1), new JarPart(0, 1, 1, 2)));
 
-        JarAssembly.Tile east = JarRecord.defaultPortalTile(assembly, BlockFace.EAST);
+        JarAssembly.Cell east = JarRecord.defaultPortalCell(assembly, BlockFace.EAST);
 
-        assertTrue(assembly.contains(east.x(), east.z()));
-        assertFalse(assembly.contains(east.x() + 1, east.z()));
+        assertTrue(assembly.contains(east.x(), east.y(), east.z()));
+        assertFalse(assembly.contains(east.x() + 1, east.y(), east.z()));
     }
 
     @Test
     void portalCannotBeStoredOnInternalFace() {
         assertThrows(IllegalArgumentException.class, () -> new JarRecord(
                 UUID.randomUUID(), UUID.randomUUID(), "world", 0, 64, 0,
-                BlockFace.EAST, 0, 0, 0, 32,
+                BlockFace.EAST, 0, 0, 0, 0, 32,
                 List.of(new JarPart(0, 0, 2, 1)), true));
+    }
+
+    @Test
+    void supportsVerticalPartsAndOpenSharedFaces() {
+        JarAssembly assembly = new JarAssembly(List.of(
+                new JarPart(0, 0, 0, 1, 1, 1),
+                new JarPart(0, 1, 0, 1, 1, 1)));
+
+        assertEquals(2, assembly.height());
+        assertEquals(2, assembly.cells().size());
+        assertTrue(assembly.contains(0, 0, 0));
+        assertTrue(assembly.contains(0, 1, 0));
+        assertFalse(assembly.contains(0, 2, 0));
+    }
+
+    @Test
+    void normalizationPreservesVerticalOffsets() {
+        JarAssembly normalized = new JarAssembly(List.of(
+                new JarPart(0, -2, 0, 1, 1, 1),
+                new JarPart(1, 1, 0, 1, 2, 1))).normalized();
+
+        assertEquals(new JarPart(0, 0, 0, 1, 1, 1), normalized.parts().get(0));
+        assertEquals(new JarPart(1, 3, 0, 1, 2, 1), normalized.parts().get(1));
+        assertEquals(5, normalized.height());
+    }
+
+    @Test
+    void reusesCachedGeometry() {
+        JarAssembly assembly = new JarAssembly(List.of(
+                new JarPart(0, 0, 0, 2, 2, 1),
+                new JarPart(2, 1, 0, 1, 1, 1)));
+        JarRecord jar = new JarRecord(UUID.randomUUID(), UUID.randomUUID(), "world",
+                0, 64, 0, BlockFace.WEST, 0, 0, 0, 0, 32,
+                assembly.parts(), true);
+
+        assertSame(assembly.cells(), assembly.cells());
+        assertSame(jar.assembly(), jar.assembly());
+        assertSame(jar.assembly().cells(), jar.assembly().cells());
+        assertEquals(3, jar.width());
+        assertEquals(2, jar.height());
     }
 }

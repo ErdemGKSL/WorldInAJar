@@ -20,6 +20,7 @@ import org.bukkit.util.Vector;
 
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -33,7 +34,7 @@ public final class PortalTransferService {
     private final JarItems items;
     private final InteriorService interiors;
     private final Map<UUID, Location> previousItemLocations = new HashMap<>();
-    private final Map<UUID, Long> cooldowns = new HashMap<>();
+    private final Map<Entity, Long> cooldowns = new IdentityHashMap<>();
     private BukkitTask itemTask;
     private long tick;
 
@@ -58,14 +59,17 @@ public final class PortalTransferService {
     }
 
     public void move(LivingEntity entity, Location from, Location to) {
-        if (entity instanceof Player || onCooldown(entity)) return;
+        if (onCooldown(entity)) return;
         if (to.getWorld() == interiors.world()) {
             JarRecord jar = containingJar(from, to);
             if (jar != null && approachesInteriorDoor(entity, jar, from, to)) transferOutside(entity, jar);
             return;
         }
-        for (JarRecord jar : repository.all()) {
-            if (!jar.placed() || !sameWorld(jar, to)) continue;
+        World world = to.getWorld();
+        if (world == null) return;
+        String worldName = world.getName();
+        for (JarRecord jar : repository.withPortals()) {
+            if (!jar.placed() || !jar.world().equals(worldName)) continue;
             if (approachesExteriorDoor(entity, jar, from, to)) {
                 transferInside(entity, jar);
                 return;
@@ -85,8 +89,7 @@ public final class PortalTransferService {
     private void tickItems() {
         tick++;
         Set<UUID> seen = new HashSet<>();
-        for (JarRecord jar : repository.all()) {
-            if (!jar.hasPortal()) continue;
+        for (JarRecord jar : repository.withPortals()) {
             if (jar.placed()) scanExteriorItems(jar, seen);
             scanInteriorItems(jar, seen);
         }
@@ -97,7 +100,8 @@ public final class PortalTransferService {
     private void scanExteriorItems(JarRecord jar, Set<UUID> seen) {
         Location center = jar.outsideCenter();
         if (center == null) return;
-        BoundingBox bounds = BoundingBox.of(center, jar.width() / 2.0 + 1.5, 1.75,
+        BoundingBox bounds = BoundingBox.of(center, jar.width() / 2.0 + 1.5,
+                jar.height() / 2.0 + 1.75,
                 jar.depth() / 2.0 + 1.5);
         for (Entity candidate : center.getWorld().getNearbyEntities(bounds, entity -> entity instanceof Item)) {
             Item item = (Item) candidate;
@@ -126,7 +130,7 @@ public final class PortalTransferService {
     }
 
     private JarRecord containingJar(Location from, Location to) {
-        for (JarRecord jar : repository.all()) {
+        for (JarRecord jar : repository.withPortals()) {
             if (interiors.contains(jar, to) || interiors.contains(jar, from)) return jar;
         }
         return null;
@@ -134,27 +138,28 @@ public final class PortalTransferService {
 
     private boolean approachesExteriorDoor(Entity entity, JarRecord jar, Location from, Location to) {
         if (!jar.hasPortal()) return false;
-        Location outside = jar.outsideLocation();
-        if (outside == null || to.getWorld() != outside.getWorld()) return false;
         BlockFace door = jar.door();
-        Location doorBlock = jar.doorBlockLocation();
-        double planeX = doorBlock.getX() + (door == BlockFace.EAST ? 1.0 : door == BlockFace.WEST ? 0.0 : .5);
-        double planeZ = doorBlock.getZ() + (door == BlockFace.SOUTH ? 1.0 : door == BlockFace.NORTH ? 0.0 : .5);
+        int doorX = jar.x() + jar.doorX();
+        int doorY = jar.y() + jar.doorY();
+        int doorZ = jar.z() + jar.doorZ();
+        double planeX = doorX + (door == BlockFace.EAST ? 1.0 : door == BlockFace.WEST ? 0.0 : .5);
+        double planeZ = doorZ + (door == BlockFace.SOUTH ? 1.0 : door == BlockFace.NORTH ? 0.0 : .5);
         double distance = outwardDistance(to, planeX, planeZ, door);
         double maximum = Math.max(.85, entity.getWidth() / 2.0 + .45);
-        if (distance < -.1 || distance > maximum || !overlapsExteriorOpening(entity, jar, to)) return false;
+        if (distance < -.1 || distance > maximum
+                || !overlapsExteriorOpening(entity, door, doorX, doorY, doorZ, to)) return false;
         return outwardProgress(from, to, door) < -APPROACH_EPSILON
                 || outwardVelocity(entity, door) < -APPROACH_EPSILON;
     }
 
     private boolean approachesInteriorDoor(Entity entity, JarRecord jar, Location from, Location to) {
         if (!jar.hasPortal()) return false;
-        if (to.getWorld() != interiors.world() || !overlapsInteriorOpening(entity, jar, to)) return false;
+        if (to.getWorld() != interiors.world()) return false;
         CellLayout.Cell cell = interiors.cell(jar);
         BlockFace door = jar.door();
-        JarAssembly.Tile tile = doorTile(jar);
-        double tileX = cell.minX() + tile.x() * jar.scale();
-        double tileZ = cell.minZ() + tile.z() * jar.scale();
+        if (!overlapsInteriorOpening(entity, jar, cell, to)) return false;
+        double tileX = cell.minX() + jar.doorX() * jar.scale();
+        double tileZ = cell.minZ() + jar.doorZ() * jar.scale();
         double planeX = door == BlockFace.WEST ? tileX + 1.0
                 : door == BlockFace.EAST ? tileX + jar.scale() - 1.0 : to.getX();
         double planeZ = door == BlockFace.NORTH ? tileZ + 1.0
@@ -166,22 +171,23 @@ public final class PortalTransferService {
                 || outwardVelocity(entity, door) > APPROACH_EPSILON;
     }
 
-    private boolean overlapsExteriorOpening(Entity entity, JarRecord jar, Location location) {
+    private boolean overlapsExteriorOpening(Entity entity, BlockFace door,
+                                            int doorX, int doorY, int doorZ, Location location) {
         double halfWidth = entity.getWidth() / 2.0;
-        Location doorBlock = jar.doorBlockLocation();
-        boolean lateral = jar.door() == BlockFace.NORTH || jar.door() == BlockFace.SOUTH
+        boolean lateral = door == BlockFace.NORTH || door == BlockFace.SOUTH
                 ? overlaps(location.getX() - halfWidth, location.getX() + halfWidth,
-                doorBlock.getX(), doorBlock.getX() + 1.0)
+                doorX, doorX + 1.0)
                 : overlaps(location.getZ() - halfWidth, location.getZ() + halfWidth,
-                doorBlock.getZ(), doorBlock.getZ() + 1.0);
-        return lateral && overlaps(location.getY(), location.getY() + entity.getHeight(), jar.y(), jar.y() + 1.0);
+                doorZ, doorZ + 1.0);
+        return lateral && overlaps(location.getY(), location.getY() + entity.getHeight(),
+                doorY, doorY + 1.0);
     }
 
-    private boolean overlapsInteriorOpening(Entity entity, JarRecord jar, Location location) {
-        CellLayout.Cell cell = interiors.cell(jar);
-        JarAssembly.Tile tile = doorTile(jar);
-        double minX = cell.minX() + tile.x() * jar.scale();
-        double minZ = cell.minZ() + tile.z() * jar.scale();
+    private boolean overlapsInteriorOpening(Entity entity, JarRecord jar,
+                                            CellLayout.Cell cell, Location location) {
+        double minX = cell.minX() + jar.doorX() * jar.scale();
+        double minY = cell.minY() + jar.doorY() * jar.scale();
+        double minZ = cell.minZ() + jar.doorZ() * jar.scale();
         double halfWidth = entity.getWidth() / 2.0;
         boolean lateral = jar.door() == BlockFace.NORTH || jar.door() == BlockFace.SOUTH
                 ? overlaps(location.getX() - halfWidth, location.getX() + halfWidth,
@@ -189,24 +195,24 @@ public final class PortalTransferService {
                 : overlaps(location.getZ() - halfWidth, location.getZ() + halfWidth,
                 minZ + 1.0, minZ + jar.scale() - 1.0);
         return lateral && overlaps(location.getY(), location.getY() + entity.getHeight(),
-                cell.minY() + 1.0, cell.minY() + jar.scale() - 1.0);
+                minY + 1.0, minY + jar.scale() - 1.0);
     }
 
     private BoundingBox interiorDoorBounds(JarRecord jar) {
         CellLayout.Cell cell = interiors.cell(jar);
-        JarAssembly.Tile tile = doorTile(jar);
-        int minX = cell.minX() + tile.x() * jar.scale();
-        int minZ = cell.minZ() + tile.z() * jar.scale();
+        int minX = cell.minX() + jar.doorX() * jar.scale();
+        int minY = cell.minY() + jar.doorY() * jar.scale();
+        int minZ = cell.minZ() + jar.doorZ() * jar.scale();
         int size = jar.scale();
         return switch (jar.door()) {
-            case NORTH -> new BoundingBox(minX + 1, cell.minY() + 1, minZ + 1,
-                    minX + size - 1, cell.minY() + size - 1, minZ + 1.01);
-            case SOUTH -> new BoundingBox(minX + 1, cell.minY() + 1, minZ + size - 1,
-                    minX + size - 1, cell.minY() + size - 1, minZ + size - .99);
-            case WEST -> new BoundingBox(minX + 1, cell.minY() + 1, minZ + 1,
-                    minX + 1.01, cell.minY() + size - 1, minZ + size - 1);
-            case EAST -> new BoundingBox(minX + size - 1, cell.minY() + 1, minZ + 1,
-                    minX + size - .99, cell.minY() + size - 1, minZ + size - 1);
+            case NORTH -> new BoundingBox(minX + 1, minY + 1, minZ + 1,
+                    minX + size - 1, minY + size - 1, minZ + 1.01);
+            case SOUTH -> new BoundingBox(minX + 1, minY + 1, minZ + size - 1,
+                    minX + size - 1, minY + size - 1, minZ + size - .99);
+            case WEST -> new BoundingBox(minX + 1, minY + 1, minZ + 1,
+                    minX + 1.01, minY + size - 1, minZ + size - 1);
+            case EAST -> new BoundingBox(minX + size - 1, minY + 1, minZ + 1,
+                    minX + size - .99, minY + size - 1, minZ + size - 1);
             default -> throw new IllegalStateException("Jar door must be horizontal");
         };
     }
@@ -250,18 +256,18 @@ public final class PortalTransferService {
 
     private Location insideDestination(JarRecord jar, Entity entity) {
         CellLayout.Cell cell = interiors.cell(jar);
-        JarAssembly.Tile tile = doorTile(jar);
-        double x = cell.minX() + tile.x() * jar.scale() + jar.scale() / 2.0;
-        double z = cell.minZ() + tile.z() * jar.scale() + jar.scale() / 2.0;
+        double x = cell.minX() + jar.doorX() * jar.scale() + jar.scale() / 2.0;
+        double z = cell.minZ() + jar.doorZ() * jar.scale() + jar.scale() / 2.0;
         double offset = entity == null ? .35 : entity.getWidth() / 2.0 + .25;
         switch (jar.door()) {
-            case NORTH -> z = cell.minZ() + tile.z() * jar.scale() + 1.0 + offset;
-            case SOUTH -> z = cell.minZ() + (tile.z() + 1) * jar.scale() - 1.0 - offset;
-            case WEST -> x = cell.minX() + tile.x() * jar.scale() + 1.0 + offset;
-            case EAST -> x = cell.minX() + (tile.x() + 1) * jar.scale() - 1.0 - offset;
+            case NORTH -> z = cell.minZ() + jar.doorZ() * jar.scale() + 1.0 + offset;
+            case SOUTH -> z = cell.minZ() + (jar.doorZ() + 1) * jar.scale() - 1.0 - offset;
+            case WEST -> x = cell.minX() + jar.doorX() * jar.scale() + 1.0 + offset;
+            case EAST -> x = cell.minX() + (jar.doorX() + 1) * jar.scale() - 1.0 - offset;
             default -> throw new IllegalStateException("Jar door must be horizontal");
         }
-        double y = cell.minY() + (entity instanceof LivingEntity ? 1.05 : 1.4);
+        double y = cell.minY() + jar.doorY() * jar.scale()
+                + (entity instanceof LivingEntity ? 1.05 : 1.4);
         return new Location(interiors.world(), x, y, z,
                 entity == null ? 0 : entity.getYaw(), entity == null ? 0 : entity.getPitch());
     }
@@ -269,8 +275,8 @@ public final class PortalTransferService {
     private Location outsideDestination(JarRecord jar, Entity entity) {
         BlockFace door = jar.door();
         double offset = .5 + entity.getWidth() / 2.0 + .2;
-        double y = jar.y() + (entity instanceof LivingEntity ? .05 : .5);
         Location doorBlock = jar.doorBlockLocation();
+        double y = doorBlock.getY() + (entity instanceof LivingEntity ? .05 : .5);
         double x = doorBlock.getX() + .5;
         double z = doorBlock.getZ() + .5;
         return new Location(entityWorld(jar), x + door.getModX() * offset, y,
@@ -328,21 +334,12 @@ public final class PortalTransferService {
     }
 
     private boolean onCooldown(Entity entity) {
-        return cooldowns.getOrDefault(entity.getUniqueId(), 0L) > tick;
+        return cooldowns.getOrDefault(entity, 0L) > tick;
     }
 
     private void markTransferred(Entity entity) {
-        cooldowns.put(entity.getUniqueId(), tick + TRANSFER_COOLDOWN_TICKS);
+        cooldowns.put(entity, tick + TRANSFER_COOLDOWN_TICKS);
         previousItemLocations.remove(entity.getUniqueId());
-    }
-
-    private static boolean sameWorld(JarRecord jar, Location location) {
-        return location.getWorld() != null && location.getWorld().getName().equals(jar.world());
-    }
-
-    private static JarAssembly.Tile doorTile(JarRecord jar) {
-        Location door = jar.doorBlockLocation();
-        return new JarAssembly.Tile(door.getBlockX() - jar.x(), door.getBlockZ() - jar.z());
     }
 
     static double outwardDistance(Location location, double planeX, double planeZ, BlockFace door) {

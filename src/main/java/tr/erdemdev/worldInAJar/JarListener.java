@@ -92,14 +92,16 @@ public final class JarListener implements Listener {
             assembly = jar.assembly();
             scale = jar.scale();
         }
-        JarAssembly.Tile placementTile = assembly.tiles().stream()
-                .min(java.util.Comparator.comparingInt(JarAssembly.Tile::z).thenComparingInt(JarAssembly.Tile::x))
+        JarAssembly.Cell placementCell = assembly.cells().stream()
+                .min(java.util.Comparator.comparingInt(JarAssembly.Cell::y)
+                        .thenComparingInt(JarAssembly.Cell::z).thenComparingInt(JarAssembly.Cell::x))
                 .orElseThrow();
-        Location origin = event.getBlockPlaced().getLocation().clone().subtract(placementTile.x(), 0, placementTile.z());
+        Location origin = event.getBlockPlaced().getLocation().clone()
+                .subtract(placementCell.x(), placementCell.y(), placementCell.z());
         if (!canPlaceFootprint(origin.getBlock(), assembly, event.getBlockPlaced())) {
             event.setCancelled(true);
             event.getPlayer().sendMessage("§cThere is not enough empty space for this "
-                    + assembly.width() + "x" + assembly.depth() + " jar assembly.");
+                    + assembly.width() + "x" + assembly.height() + "x" + assembly.depth() + " jar assembly.");
             return;
         }
         BlockFace door = horizontalOpposite(event.getPlayer().getFacing());
@@ -171,7 +173,7 @@ public final class JarListener implements Listener {
             removePortal(event.getPlayer(), jar, block);
             return;
         }
-        if (horizontal(event.getBlockFace()) && items.isJar(event.getItem())) {
+        if (directional(event.getBlockFace()) && items.isJar(event.getItem())) {
             event.setCancelled(true);
             attach(event.getPlayer(), jar, block, event.getBlockFace(), event.getItem());
         }
@@ -265,6 +267,7 @@ public final class JarListener implements Listener {
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onEntityMove(EntityMoveEvent event) {
+        if (!event.hasChangedPosition()) return;
         transfers.move(event.getEntity(), event.getFrom(), event.getTo());
     }
 
@@ -360,12 +363,13 @@ public final class JarListener implements Listener {
             player.sendMessage("§cThis jar already has a portal side. Remove it first.");
             return;
         }
-        int tileX = block.getX() - jar.x(), tileZ = block.getZ() - jar.z();
-        if (jar.assembly().contains(tileX + face.getModX(), tileZ + face.getModZ())) {
+        int cellX = block.getX() - jar.x(), cellY = block.getY() - jar.y();
+        int cellZ = block.getZ() - jar.z();
+        if (jar.assembly().contains(cellX + face.getModX(), cellY, cellZ + face.getModZ())) {
             player.sendMessage("§cA portal side can only be installed on an exposed face.");
             return;
         }
-        JarRecord updated = jar.withPortal(tileX, tileZ, face);
+        JarRecord updated = jar.withPortal(cellX, cellY, cellZ, face);
         repository.put(updated);
         consumeMainHand(player);
         previews.refresh(updated);
@@ -383,12 +387,15 @@ public final class JarListener implements Listener {
 
     private void attach(Player player, JarRecord target, Block clicked, BlockFace face, ItemStack held) {
         JarAssembly targetAssembly = target.assembly();
-        int targetTileX = clicked.getX() - target.x(), targetTileZ = clicked.getZ() - target.z();
-        if (targetAssembly.contains(targetTileX + face.getModX(), targetTileZ + face.getModZ())) {
+        int targetCellX = clicked.getX() - target.x(), targetCellY = clicked.getY() - target.y();
+        int targetCellZ = clicked.getZ() - target.z();
+        if (targetAssembly.contains(targetCellX + face.getModX(), targetCellY + face.getModY(),
+                targetCellZ + face.getModZ())) {
             player.sendMessage("§cThat side is already joined to this jar.");
             return;
         }
-        if (target.hasPortal() && target.doorX() == targetTileX && target.doorZ() == targetTileZ
+        if (target.hasPortal() && target.doorX() == targetCellX && target.doorY() == targetCellY
+                && target.doorZ() == targetCellZ
                 && target.door() == face) {
             player.sendMessage("§cRemove the portal side before attaching a jar there.");
             return;
@@ -412,33 +419,39 @@ public final class JarListener implements Listener {
             player.sendMessage("§cThe held jar does not fit on that side or exceeds the size limit.");
             return;
         }
-        int sourceOriginX = plan.sourceOriginX(), sourceOriginZ = plan.sourceOriginZ();
+        int sourceOriginX = plan.sourceOriginX(), sourceOriginY = plan.sourceOriginY();
+        int sourceOriginZ = plan.sourceOriginZ();
         JarAssembly global = plan.global(), combined = global.normalized();
 
         BlockFace portalFace = target.door();
         int portalX = target.hasPortal() ? target.x() + target.doorX() - global.minX() : 0;
+        int portalY = target.hasPortal() ? target.y() + target.doorY() - global.minY() : 0;
         int portalZ = target.hasPortal() ? target.z() + target.doorZ() - global.minZ() : 0;
         boolean sourcePortalAdopted = false;
         if (!target.hasPortal() && source != null && source.hasPortal()) {
             int globalPortalX = sourceOriginX + source.doorX();
+            int globalPortalY = sourceOriginY + source.doorY();
             int globalPortalZ = sourceOriginZ + source.doorZ();
-            if (!global.contains(globalPortalX + source.door().getModX(),
+            if (!global.contains(globalPortalX + source.door().getModX(), globalPortalY,
                     globalPortalZ + source.door().getModZ())) {
                 portalFace = source.door();
                 portalX = globalPortalX - global.minX();
+                portalY = globalPortalY - global.minY();
                 portalZ = globalPortalZ - global.minZ();
                 sourcePortalAdopted = true;
             }
         }
 
         JarRecord oldTarget = target;
-        JarRecord combinedRecord = repository.replaceInNewCell(oldTarget, target.world(), global.minX(), target.y(),
-                global.minZ(), portalFace, portalX, portalZ, combined, true);
+        JarRecord combinedRecord = repository.replaceInNewCell(oldTarget, target.world(), global.minX(), global.minY(),
+                global.minZ(), portalFace, portalX, portalY, portalZ, combined, true);
         List<InteriorService.InteriorCopy> copies = new ArrayList<>();
         copies.add(new InteriorService.InteriorCopy(oldTarget,
-                target.x() - global.minX(), target.z() - global.minZ(), null));
+                target.x() - global.minX(), target.y() - global.minY(),
+                target.z() - global.minZ(), null));
         if (source != null) copies.add(new InteriorService.InteriorCopy(source,
-                sourceOriginX - global.minX(), sourceOriginZ - global.minZ(), null));
+                sourceOriginX - global.minX(), sourceOriginY - global.minY(),
+                sourceOriginZ - global.minZ(), null));
         interiors.copyRegions(combinedRecord, copies);
         interiors.destroyCell(oldTarget);
         if (source != null) {
@@ -450,8 +463,9 @@ public final class JarListener implements Listener {
                         items.createPortalSide());
             }
         }
-        for (JarAssembly.Tile tile : sourceAssembly.tiles()) {
-            clicked.getWorld().getBlockAt(sourceOriginX + tile.x(), target.y(), sourceOriginZ + tile.z())
+        for (JarAssembly.Cell cell : sourceAssembly.cells()) {
+            clicked.getWorld().getBlockAt(sourceOriginX + cell.x(), sourceOriginY + cell.y(),
+                            sourceOriginZ + cell.z())
                     .setType(Material.GLASS, false);
         }
         player.getInventory().setItemInMainHand(null);
@@ -461,17 +475,21 @@ public final class JarListener implements Listener {
 
     private AttachmentPlan findAttachment(JarRecord target, Block clicked, BlockFace face,
                                           JarAssembly sourceAssembly) {
-        List<JarAssembly.Tile> contacts = sourceAssembly.tiles().stream()
-                .filter(tile -> !sourceAssembly.contains(tile.x() - face.getModX(), tile.z() - face.getModZ()))
-                .sorted(java.util.Comparator.comparingInt(JarAssembly.Tile::z).thenComparingInt(JarAssembly.Tile::x))
+        List<JarAssembly.Cell> contacts = sourceAssembly.cells().stream()
+                .filter(cell -> !sourceAssembly.contains(cell.x() - face.getModX(),
+                        cell.y() - face.getModY(), cell.z() - face.getModZ()))
+                .sorted(java.util.Comparator.comparingInt(JarAssembly.Cell::y)
+                        .thenComparingInt(JarAssembly.Cell::z).thenComparingInt(JarAssembly.Cell::x))
                 .toList();
         int maximum = Math.max(1, plugin.getConfig().getInt("jar.max-combined-size", 9));
-        for (JarAssembly.Tile contact : contacts) {
+        for (JarAssembly.Cell contact : contacts) {
             int sourceOriginX = clicked.getX() + face.getModX() - contact.x();
+            int sourceOriginY = clicked.getY() + face.getModY() - contact.y();
             int sourceOriginZ = clicked.getZ() + face.getModZ() - contact.z();
             List<JarPart> globalParts = new ArrayList<>();
-            target.parts().forEach(part -> globalParts.add(part.translated(target.x(), target.z())));
-            sourceAssembly.parts().forEach(part -> globalParts.add(part.translated(sourceOriginX, sourceOriginZ)));
+            target.parts().forEach(part -> globalParts.add(part.translated(target.x(), target.y(), target.z())));
+            sourceAssembly.parts().forEach(part -> globalParts.add(part.translated(
+                    sourceOriginX, sourceOriginY, sourceOriginZ)));
             JarAssembly global;
             try {
                 global = new JarAssembly(globalParts);
@@ -480,74 +498,89 @@ public final class JarListener implements Listener {
             }
             if (target.hasPortal()) {
                 int portalX = target.x() + target.doorX();
+                int portalY = target.y() + target.doorY();
                 int portalZ = target.z() + target.doorZ();
-                if (global.contains(portalX + target.door().getModX(),
+                if (global.contains(portalX + target.door().getModX(), portalY,
                         portalZ + target.door().getModZ())) continue;
             }
             JarAssembly combined = global.normalized();
-            if (combined.width() > maximum || combined.depth() > maximum
+            if (combined.width() > maximum || combined.height() > maximum || combined.depth() > maximum
                     || combined.width() * target.scale() > interiors.maximumInteriorSize()
+                    || combined.height() * target.scale() > interiors.maximumInteriorHeight()
                     || combined.depth() * target.scale() > interiors.maximumInteriorSize()) continue;
             boolean clear = true;
-            for (JarAssembly.Tile tile : sourceAssembly.tiles()) {
+            for (JarAssembly.Cell cell : sourceAssembly.cells()) {
+                int destinationY = sourceOriginY + cell.y();
+                if (destinationY < clicked.getWorld().getMinHeight()
+                        || destinationY >= clicked.getWorld().getMaxHeight()) {
+                    clear = false;
+                    break;
+                }
                 Block destination = clicked.getWorld().getBlockAt(
-                        sourceOriginX + tile.x(), target.y(), sourceOriginZ + tile.z());
+                        sourceOriginX + cell.x(), destinationY, sourceOriginZ + cell.z());
                 if (!destination.isEmpty() || repository.at(destination.getLocation()).isPresent()) {
                     clear = false;
                     break;
                 }
             }
-            if (clear) return new AttachmentPlan(sourceOriginX, sourceOriginZ, global);
+            if (clear) return new AttachmentPlan(sourceOriginX, sourceOriginY, sourceOriginZ, global);
         }
         return null;
     }
 
-    private record AttachmentPlan(int sourceOriginX, int sourceOriginZ, JarAssembly global) {}
+    private record AttachmentPlan(int sourceOriginX, int sourceOriginY, int sourceOriginZ,
+                                  JarAssembly global) {}
 
     private void detachPart(Player player, JarRecord oldJar, Block clicked) {
-        int tileX = clicked.getX() - oldJar.x(), tileZ = clicked.getZ() - oldJar.z();
-        JarPart detachedPart = oldJar.assembly().partAt(tileX, tileZ);
+        int cellX = clicked.getX() - oldJar.x(), cellY = clicked.getY() - oldJar.y();
+        int cellZ = clicked.getZ() - oldJar.z();
+        JarPart detachedPart = oldJar.assembly().partAt(cellX, cellY, cellZ);
         if (detachedPart == null) return;
 
         List<JarPart> remainingParts = new ArrayList<>(oldJar.parts());
         remainingParts.remove(detachedPart);
         JarAssembly remainingRaw = new JarAssembly(remainingParts);
-        int shiftX = remainingRaw.minX(), shiftZ = remainingRaw.minZ();
+        int shiftX = remainingRaw.minX(), shiftY = remainingRaw.minY(), shiftZ = remainingRaw.minZ();
         JarAssembly remaining = remainingRaw.normalized();
-        JarAssembly detached = JarAssembly.rectangle(detachedPart.width(), detachedPart.depth());
-        Set<JarAssembly.Tile> detachedTiles = new java.util.HashSet<>();
+        JarAssembly detached = JarAssembly.cuboid(detachedPart.width(), detachedPart.height(), detachedPart.depth());
+        Set<JarAssembly.Cell> detachedCells = new java.util.HashSet<>();
         for (int x = detachedPart.x(); x < detachedPart.x() + detachedPart.width(); x++) {
-            for (int z = detachedPart.z(); z < detachedPart.z() + detachedPart.depth(); z++) {
-                detachedTiles.add(new JarAssembly.Tile(x, z));
+            for (int y = detachedPart.y(); y < detachedPart.y() + detachedPart.height(); y++) {
+                for (int z = detachedPart.z(); z < detachedPart.z() + detachedPart.depth(); z++) {
+                    detachedCells.add(new JarAssembly.Cell(x, y, z));
+                }
             }
         }
-        Set<JarAssembly.Tile> remainingTiles = new java.util.HashSet<>(oldJar.assembly().tiles());
-        remainingTiles.removeAll(detachedTiles);
+        Set<JarAssembly.Cell> remainingCells = new java.util.HashSet<>(oldJar.assembly().cells());
+        remainingCells.removeAll(detachedCells);
 
         boolean portalDetached = oldJar.hasPortal()
-                && detachedTiles.contains(new JarAssembly.Tile(oldJar.doorX(), oldJar.doorZ()));
+                && detachedCells.contains(new JarAssembly.Cell(oldJar.doorX(), oldJar.doorY(), oldJar.doorZ()));
         BlockFace remainingPortal = oldJar.hasPortal() && !portalDetached ? oldJar.door() : null;
         int remainingPortalX = remainingPortal == null ? 0 : oldJar.doorX() - shiftX;
+        int remainingPortalY = remainingPortal == null ? 0 : oldJar.doorY() - shiftY;
         int remainingPortalZ = remainingPortal == null ? 0 : oldJar.doorZ() - shiftZ;
         BlockFace detachedPortal = portalDetached ? oldJar.door() : null;
         int detachedPortalX = detachedPortal == null ? 0 : oldJar.doorX() - detachedPart.x();
+        int detachedPortalY = detachedPortal == null ? 0 : oldJar.doorY() - detachedPart.y();
         int detachedPortalZ = detachedPortal == null ? 0 : oldJar.doorZ() - detachedPart.z();
 
         JarRecord remainingRecord = repository.replaceInNewCell(oldJar, oldJar.world(),
-                oldJar.x() + shiftX, oldJar.y(), oldJar.z() + shiftZ,
-                remainingPortal, remainingPortalX, remainingPortalZ, remaining, true);
-        JarRecord detachedRecord = repository.createCarried(oldJar.owner(), oldJar.world(), clicked.getX(),
-                oldJar.y(), clicked.getZ(), detachedPortal, detachedPortalX, detachedPortalZ,
+                oldJar.x() + shiftX, oldJar.y() + shiftY, oldJar.z() + shiftZ,
+                remainingPortal, remainingPortalX, remainingPortalY, remainingPortalZ, remaining, true);
+        JarRecord detachedRecord = repository.createCarried(oldJar.owner(), oldJar.world(),
+                oldJar.x() + detachedPart.x(), oldJar.y() + detachedPart.y(), oldJar.z() + detachedPart.z(),
+                detachedPortal, detachedPortalX, detachedPortalY, detachedPortalZ,
                 oldJar.scale(), detached);
         interiors.copyRegions(detachedRecord, List.of(new InteriorService.InteriorCopy(
-                oldJar, -detachedPart.x(), -detachedPart.z(), detachedTiles)));
+                oldJar, -detachedPart.x(), -detachedPart.y(), -detachedPart.z(), detachedCells)));
         interiors.copyRegions(remainingRecord, List.of(new InteriorService.InteriorCopy(
-                oldJar, -shiftX, -shiftZ, remainingTiles)));
+                oldJar, -shiftX, -shiftY, -shiftZ, remainingCells)));
         interiors.destroyCell(oldJar);
 
         Location oldOrigin = oldJar.outsideLocation();
-        for (JarAssembly.Tile tile : detachedTiles) {
-            Block block = oldOrigin.getBlock().getRelative(tile.x(), 0, tile.z());
+        for (JarAssembly.Cell cell : detachedCells) {
+            Block block = oldOrigin.getBlock().getRelative(cell.x(), cell.y(), cell.z());
             block.setType(Material.AIR, false);
             previews.transportBlock(block.getLocation());
         }
@@ -559,8 +592,10 @@ public final class JarListener implements Listener {
     }
 
     private boolean canPlaceFootprint(Block origin, JarAssembly assembly, Block alreadyPlaced) {
-        for (JarAssembly.Tile tile : assembly.tiles()) {
-            Block block = origin.getRelative(tile.x(), 0, tile.z());
+        for (JarAssembly.Cell cell : assembly.cells()) {
+            int blockY = origin.getY() + cell.y();
+            if (blockY < origin.getWorld().getMinHeight() || blockY >= origin.getWorld().getMaxHeight()) return false;
+            Block block = origin.getRelative(cell.x(), cell.y(), cell.z());
             if (!block.equals(alreadyPlaced) && !block.isEmpty()) return false;
             JarRecord occupying = repository.at(block.getLocation()).orElse(null);
             if (occupying != null) return false;
@@ -571,8 +606,8 @@ public final class JarListener implements Listener {
     private void placeFootprint(JarRecord jar, Material material) {
         Location origin = jar.outsideLocation();
         if (origin == null) return;
-        for (JarAssembly.Tile tile : jar.assembly().tiles()) {
-            Block block = origin.getBlock().getRelative(tile.x(), 0, tile.z());
+        for (JarAssembly.Cell cell : jar.assembly().cells()) {
+            Block block = origin.getBlock().getRelative(cell.x(), cell.y(), cell.z());
             block.setType(material, false);
             previews.transportBlock(block.getLocation());
         }
@@ -595,6 +630,10 @@ public final class JarListener implements Listener {
     private static boolean horizontal(BlockFace face) {
         return face == BlockFace.NORTH || face == BlockFace.SOUTH
                 || face == BlockFace.EAST || face == BlockFace.WEST;
+    }
+
+    private static boolean directional(BlockFace face) {
+        return horizontal(face) || face == BlockFace.UP || face == BlockFace.DOWN;
     }
 
     private static boolean empty(ItemStack item) {

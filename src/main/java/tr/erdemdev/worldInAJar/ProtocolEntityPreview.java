@@ -59,7 +59,12 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.ConcurrentHashMap;
 
 /** Same-type, client-only entity mirrors transmitted through ProtocolLib. */
@@ -76,13 +81,27 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
     private final InteriorService interiors;
     private final ProtocolManager protocol;
     private final Map<MirrorKey, Mirror> mirrors = new HashMap<>();
+    private final Map<SourceEntityKey, Integer> mirroredSources = new ConcurrentHashMap<>();
     private final Set<Integer> forwardedHandles = ConcurrentHashMap.newKeySet();
+    private final ExecutorService packetExecutor;
     private final PacketAdapter eventPipe;
+    private final int exteriorMaximum;
+    private final int interiorMaximum;
+    private final int outsideRadius;
+    private volatile boolean running = true;
 
     ProtocolEntityPreview(JavaPlugin plugin, InteriorService interiors) {
         this.plugin = plugin;
         this.interiors = interiors;
         this.protocol = ProtocolLibrary.getProtocolManager();
+        this.exteriorMaximum = bounded("preview.exterior.max-entities", 64, 0, 256);
+        this.interiorMaximum = bounded("preview.interior.max-entities", 64, 0, 256);
+        this.outsideRadius = bounded("preview.interior.outside-radius", 6, 1, 24);
+        this.packetExecutor = Executors.newSingleThreadExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "WorldInAJar-protocol-preview");
+            thread.setDaemon(true);
+            return thread;
+        });
         this.eventPipe = new PacketAdapter(plugin, List.of(PacketType.Play.Server.ANIMATION,
                 PacketType.Play.Server.ENTITY_STATUS, PacketType.Play.Server.HURT_ANIMATION,
                 PacketType.Play.Server.ENTITY_EFFECT, PacketType.Play.Server.REMOVE_ENTITY_EFFECT,
@@ -99,6 +118,7 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
                 Integer sourceId = event.getPacket().getIntegers().readSafely(0);
                 if (sourceId == null) return;
                 UUID sourceWorldId = event.getPlayer().getWorld().getUID();
+                if (!mirroredSources.containsKey(new SourceEntityKey(sourceWorldId, sourceId))) return;
                 PacketType packetType = event.getPacketType();
                 int token = System.identityHashCode(event.getPacket().getHandle());
                 if (!forwardedHandles.add(token)) return;
@@ -131,12 +151,10 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
     public void update(JarRecord jar, Set<UUID> exteriorViewers, Set<UUID> interiorViewers) {
         Set<MirrorKey> present = new HashSet<>();
         if (!exteriorViewers.isEmpty()) {
-            int maximum = bounded("preview.exterior.max-entities", 64, 0, 256);
-            sync(jar, Side.EXTERIOR, interiorEntities(jar, maximum), exteriorViewers, present);
+            sync(jar, Side.EXTERIOR, interiorEntities(jar, exteriorMaximum), exteriorViewers, present);
         }
         if (!interiorViewers.isEmpty()) {
-            int maximum = bounded("preview.interior.max-entities", 64, 0, 256);
-            sync(jar, Side.INTERIOR, outsideEntities(jar, maximum), interiorViewers, present);
+            sync(jar, Side.INTERIOR, outsideEntities(jar, interiorMaximum), interiorViewers, present);
         }
         for (MirrorKey key : new ArrayList<>(mirrors.keySet())) {
             if (key.jarId.equals(jar.id()) && !present.contains(key)) removeMirror(key);
@@ -145,17 +163,22 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
 
     private void sync(JarRecord jar, Side side, List<Entity> sources, Set<UUID> viewerIds, Set<MirrorKey> present) {
         Collection<Player> viewers = online(viewerIds);
+        CoordinateMapping mapping = mapping(jar, side);
         List<MirrorUpdate> updates = new ArrayList<>(sources.size());
         for (Entity source : sources) {
             MirrorKey key = new MirrorKey(jar.id(), side, source.getUniqueId());
             present.add(key);
             Mirror mirror = mirrors.computeIfAbsent(key, ignored -> new Mirror(key, source));
-            updates.add(new MirrorUpdate(mirror, source, mapped(jar, side, source.getLocation()), scale(jar, side)));
+            updates.add(new MirrorUpdate(mirror, source, source.getLocation(), scale(jar, side), mapping));
         }
         updates.sort((left, right) -> Integer.compare(spawnPriority(left.source), spawnPriority(right.source)));
         for (MirrorUpdate update : updates) update.mirror.prepare(jar, update.source, update.scale, viewers);
-        for (MirrorUpdate update : updates) update.mirror.spawnFor(update.source, update.location, viewers);
-        for (MirrorUpdate update : updates) update.mirror.syncFor(update.source, update.location, viewers);
+        for (MirrorUpdate update : updates) {
+            update.mirror.spawnFor(update.source, update.sourceLocation, update.mapping, viewers);
+        }
+        for (MirrorUpdate update : updates) {
+            update.mirror.syncFor(update.source, update.sourceLocation, update.mapping, viewers);
+        }
     }
 
     private static int spawnPriority(Entity source) {
@@ -166,7 +189,7 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
         if (maximum == 0) return List.of();
         CellLayout.Cell cell = interiors.cell(jar);
         BoundingBox bounds = new BoundingBox(cell.minX(), cell.minY(), cell.minZ(),
-                cell.minX() + jar.interiorSizeX(), cell.minY() + jar.scale(),
+                cell.minX() + jar.interiorSizeX(), cell.minY() + jar.interiorSizeY(),
                 cell.minZ() + jar.interiorSizeZ());
         List<Entity> result = new ArrayList<>();
         for (Entity entity : interiors.world().getNearbyEntities(bounds,
@@ -179,11 +202,11 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
 
     private List<Entity> outsideEntities(JarRecord jar, int maximum) {
         if (maximum == 0) return List.of();
-        int radius = bounded("preview.interior.outside-radius", 6, 1, 24);
         Location center = jar.outsideCenter();
         List<Entity> result = new ArrayList<>();
-        for (Entity entity : center.getWorld().getNearbyEntities(center, radius, radius, radius, this::eligible)) {
-            if (entity.getLocation().distanceSquared(center) > radius * radius) continue;
+        for (Entity entity : center.getWorld().getNearbyEntities(
+                center, outsideRadius, outsideRadius, outsideRadius, this::eligible)) {
+            if (entity.getLocation().distanceSquared(center) > outsideRadius * outsideRadius) continue;
             result.add(entity);
             if (result.size() >= maximum) break;
         }
@@ -214,6 +237,18 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
                 source.getYaw(), source.getPitch());
     }
 
+    private CoordinateMapping mapping(JarRecord jar, Side side) {
+        Location outside = jar.outsideLocation();
+        CellLayout.Cell cell = interiors.cell(jar);
+        double scale = scale(jar, side);
+        if (side == Side.EXTERIOR) {
+            return new CoordinateMapping(scale, outside.getX() - cell.minX() * scale,
+                    outside.getY() - cell.minY() * scale, outside.getZ() - cell.minZ() * scale);
+        }
+        return new CoordinateMapping(scale, cell.minX() - outside.getX() * scale,
+                cell.minY() + 1 - outside.getY() * scale, cell.minZ() - outside.getZ() * scale);
+    }
+
     private static double scale(JarRecord jar, Side side) {
         return side == Side.EXTERIOR ? 1.0 / jar.scale() : jar.scale();
     }
@@ -240,23 +275,41 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
         protocol.removePacketListener(eventPipe);
         for (Mirror mirror : mirrors.values()) mirror.destroyAll();
         mirrors.clear();
+        mirroredSources.clear();
+        running = false;
+        packetExecutor.shutdown();
     }
 
     private void removeMirror(MirrorKey key) {
         Mirror mirror = mirrors.remove(key);
-        if (mirror != null) mirror.destroyAll();
+        if (mirror != null) {
+            mirror.unregisterSource();
+            mirror.destroyAll();
+        }
+    }
+
+    private void registerSource(SourceEntityKey source) {
+        mirroredSources.merge(source, 1, Integer::sum);
+    }
+
+    private void unregisterSource(SourceEntityKey source) {
+        mirroredSources.computeIfPresent(source, (ignored, count) -> count == 1 ? null : count - 1);
     }
 
     private void relay(UUID sourceWorldId, int sourceId, PacketContainer sourcePacket) {
+        List<RelayTarget> targets = new ArrayList<>();
         for (Mirror mirror : mirrors.values()) {
             if (!mirror.matchesStoredSource(sourceWorldId, sourceId)) continue;
-            PacketContainer packet = sourcePacket.deepClone();
-            packet.getIntegers().writeSafely(0, mirror.id);
-            for (UUID viewerId : mirror.viewers) {
-                Player viewer = Bukkit.getPlayer(viewerId);
-                if (viewer != null) protocol.sendServerPacket(viewer, packet, false);
-            }
+            Collection<Player> viewers = online(mirror.viewers);
+            if (!viewers.isEmpty()) targets.add(new RelayTarget(mirror.id, List.copyOf(viewers)));
         }
+        dispatch(() -> {
+            for (RelayTarget target : targets) {
+                PacketContainer packet = sourcePacket.deepClone();
+                packet.getIntegers().writeSafely(0, target.entityId);
+                sendNow(target.viewers, List.of(packet));
+            }
+        });
     }
 
     private void relayMovement(UUID sourceWorldId, int sourceId) {
@@ -384,7 +437,43 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
     }
 
     private void send(Player viewer, Packet<? super ClientGamePacketListener> packet) {
-        protocol.sendServerPacket(viewer, PacketContainer.fromPacket(packet), false);
+        send(List.of(viewer), List.of(PacketContainer.fromPacket(packet)));
+    }
+
+    private void send(Collection<Player> viewers, Collection<PacketContainer> packets) {
+        if (viewers.isEmpty() || packets.isEmpty()) return;
+        List<Player> viewerSnapshot = List.copyOf(viewers);
+        List<PacketContainer> packetSnapshot = List.copyOf(packets);
+        dispatch(() -> sendNow(viewerSnapshot, packetSnapshot));
+    }
+
+    private void sendNow(Collection<Player> viewers, Collection<PacketContainer> packets) {
+        for (Player viewer : viewers) {
+            for (PacketContainer packet : packets) {
+                try {
+                    protocol.sendServerPacket(viewer, packet, false);
+                } catch (RuntimeException exception) {
+                    if (running) plugin.getLogger().warning("Could not send protocol preview packet: "
+                            + exception.getMessage());
+                }
+            }
+        }
+    }
+
+    private void dispatch(Runnable task) {
+        if (!running) return;
+        try {
+            packetExecutor.execute(() -> {
+                try {
+                    task.run();
+                } catch (RuntimeException exception) {
+                    if (running) plugin.getLogger().warning("Protocol preview worker failed: "
+                            + exception.getMessage());
+                }
+            });
+        } catch (RejectedExecutionException ignored) {
+            // The plugin is stopping and no more preview packets should be sent.
+        }
     }
 
     private final class Mirror {
@@ -396,6 +485,10 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
         private final PlayerTeam hiddenNameTeam;
         private final Set<UUID> viewers = new HashSet<>();
         private final Map<UUID, RelationshipState> relationships = new HashMap<>();
+        private final AtomicReference<StateDelivery> pendingState = new AtomicReference<>();
+        private final AtomicBoolean stateScheduled = new AtomicBoolean();
+        private final AtomicReference<MovementDelivery> pendingMovement = new AtomicReference<>();
+        private final AtomicBoolean movementScheduled = new AtomicBoolean();
         private JarRecord jar;
         private double worldScale;
         private int sourceEntityId;
@@ -409,13 +502,21 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
             this.hiddenNameTeam = playerName == null ? null : hiddenNameTeam(playerName);
             this.sourceEntityId = source.getEntityId();
             this.sourceWorldId = source.getWorld().getUID();
+            registerSource(sourceKey());
         }
 
         private void prepare(JarRecord jar, Entity source, double scale, Collection<Player> desired) {
             this.jar = jar;
             this.worldScale = scale;
-            sourceEntityId = source.getEntityId();
-            sourceWorldId = source.getWorld().getUID();
+            SourceEntityKey previousSource = sourceKey();
+            int currentEntityId = source.getEntityId();
+            UUID currentWorldId = source.getWorld().getUID();
+            if (sourceEntityId != currentEntityId || !sourceWorldId.equals(currentWorldId)) {
+                ProtocolEntityPreview.this.unregisterSource(previousSource);
+                sourceEntityId = currentEntityId;
+                sourceWorldId = currentWorldId;
+                registerSource(sourceKey());
+            }
             Set<UUID> desiredIds = new HashSet<>();
             for (Player viewer : desired) desiredIds.add(viewer.getUniqueId());
             for (UUID viewerId : new HashSet<>(viewers)) {
@@ -427,24 +528,29 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
             }
         }
 
-        private void spawnFor(Entity source, Location location, Collection<Player> desired) {
+        private void spawnFor(Entity source, Location sourceLocation, CoordinateMapping mapping,
+                              Collection<Player> desired) {
             for (Player viewer : desired) {
-                if (!viewers.contains(viewer.getUniqueId()) && spawn(viewer, source, location)) {
+                if (!viewers.contains(viewer.getUniqueId()) && spawn(viewer, source, sourceLocation, mapping)) {
                     viewers.add(viewer.getUniqueId());
                 }
             }
         }
 
-        private void syncFor(Entity source, Location location, Collection<Player> desired) {
-            double renderScale = renderScale(source, worldScale);
+        private void syncFor(Entity source, Location sourceLocation, CoordinateMapping mapping,
+                             Collection<Player> desired) {
+            List<Player> active = new ArrayList<>(desired.size());
             for (Player viewer : desired) {
                 if (!viewers.contains(viewer.getUniqueId())) continue;
-                syncState(viewer, source, location, worldScale, renderScale);
+                active.add(viewer);
                 syncRelationships(source, List.of(viewer));
             }
+            if (!active.isEmpty()) queueState(active,
+                    snapshotState(source, sourceLocation, mapping, worldScale));
         }
 
-        private boolean spawn(Player viewer, Entity source, Location location) {
+        private boolean spawn(Player viewer, Entity source, Location sourceLocation,
+                              CoordinateMapping mapping) {
             net.minecraft.world.entity.Entity handle = ((CraftEntity) source).getHandle();
             ChunkMap.TrackedEntity tracked = handle.moonrise$getTrackedEntity();
             if (tracked == null) return false;
@@ -452,13 +558,21 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
             if (!(nativePacket instanceof ClientboundAddEntityPacket original)) return false;
             Integer data = spawnData(viewer, handle, original.getData());
             if (data == null) return false;
-            if (hiddenNameTeam != null) {
-                send(viewer, ClientboundSetPlayerTeamPacket.createAddOrModifyPacket(hiddenNameTeam, true));
-            }
-            send(viewer, new ClientboundAddEntityPacket(id, uuid, location.getX(), location.getY(), location.getZ(),
-                    handle.getXRot(), handle.getYRot(), handle.getType(), data,
-                    handle.getDeltaMovement().scale(worldScale),
-                    handle.getYHeadRot()));
+            SpawnState state = new SpawnState(sourceLocation.getX(), sourceLocation.getY(), sourceLocation.getZ(),
+                    mapping, handle.getXRot(), handle.getYRot(), handle.getType(), data,
+                    handle.getDeltaMovement(), handle.getYHeadRot(), worldScale);
+            dispatch(() -> {
+                List<PacketContainer> packets = new ArrayList<>(2);
+                if (hiddenNameTeam != null) {
+                    packets.add(PacketContainer.fromPacket(
+                            ClientboundSetPlayerTeamPacket.createAddOrModifyPacket(hiddenNameTeam, true)));
+                }
+                packets.add(PacketContainer.fromPacket(new ClientboundAddEntityPacket(id, uuid,
+                        state.mapping.x(state.sourceX), state.mapping.y(state.sourceY),
+                        state.mapping.z(state.sourceZ), state.pitch, state.yaw, state.type, state.data,
+                        state.velocity.scale(state.worldScale), state.headYaw)));
+                sendNow(List.of(viewer), packets);
+            });
             return true;
         }
 
@@ -481,39 +595,109 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
             return sourceEntityId == entityId && sourceWorldId.equals(worldId);
         }
 
-        private void syncState(Player viewer, Entity source, Location location, double scale, double renderScale) {
-            net.minecraft.world.entity.Entity handle = ((CraftEntity) source).getHandle();
-            send(viewer, new ClientboundSetEntityDataPacket(id,
-                    hiddenNametagMetadata(handle, handle.getEntityData().packAll())));
-            sendMovement(viewer, handle, location, scale);
-            if (handle instanceof LivingEntity living) {
-                Collection<AttributeInstance> attributes = living.getAttributes().getSyncableAttributes();
-                if (!attributes.isEmpty()) send(viewer, new ClientboundUpdateAttributesPacket(id, attributes));
-                AttributeInstance scaled = new AttributeInstance(Attributes.SCALE, ignored -> {});
-                scaled.setBaseValue(renderScale);
-                send(viewer, new ClientboundUpdateAttributesPacket(id, List.of(scaled)));
-                send(viewer, equipment(living));
-            }
+        private SourceEntityKey sourceKey() {
+            return new SourceEntityKey(sourceWorldId, sourceEntityId);
         }
 
-        private void sendMovement(Player viewer, net.minecraft.world.entity.Entity handle,
-                                  Location location, double scale) {
-            send(viewer, ClientboundTeleportEntityPacket.teleport(id,
-                    new PositionMoveRotation(new Vec3(location.getX(), location.getY(), location.getZ()),
-                            handle.getDeltaMovement().scale(scale), handle.getYRot(), handle.getXRot()),
-                    Set.<Relative>of(), handle.onGround()));
+        private void unregisterSource() {
+            ProtocolEntityPreview.this.unregisterSource(sourceKey());
+        }
+
+        private EntityState snapshotState(Entity source, Location sourceLocation,
+                                          CoordinateMapping mapping, double scale) {
+            net.minecraft.world.entity.Entity handle = ((CraftEntity) source).getHandle();
+            Packet<ClientGamePacketListener> attributesPacket = null;
+            List<Pair<EquipmentSlot, ItemStack>> equipment = List.of();
+            double sourceScale = 1.0;
+            boolean supportsAttributes = false;
+            if (handle instanceof LivingEntity living) {
+                supportsAttributes = true;
+                Collection<AttributeInstance> attributes = living.getAttributes().getSyncableAttributes();
+                if (!attributes.isEmpty()) attributesPacket = new ClientboundUpdateAttributesPacket(id, attributes);
+                sourceScale = living.getScale();
+                equipment = equipment(living);
+            }
+            return new EntityState(hiddenNametagMetadata(handle, handle.getEntityData().packAll()),
+                    movementState(handle, sourceLocation, mapping, scale),
+                    attributesPacket, equipment, sourceScale, supportsAttributes);
+        }
+
+        private MovementState movementState(net.minecraft.world.entity.Entity handle,
+                                            Location sourceLocation, CoordinateMapping mapping, double scale) {
             PacketContainer headRotation = PacketContainer.fromPacket(
                     new ClientboundRotateHeadPacket(handle, Mth.packDegrees(handle.getYHeadRot())));
             headRotation.getIntegers().write(0, id);
-            protocol.sendServerPacket(viewer, headRotation, false);
-            send(viewer, new ClientboundSetEntityMotionPacket(id, handle.getDeltaMovement().scale(scale)));
+            return new MovementState(sourceLocation.getX(), sourceLocation.getY(), sourceLocation.getZ(), mapping,
+                    handle.getDeltaMovement(), handle.getYRot(), handle.getXRot(),
+                    handle.onGround(), headRotation, scale);
+        }
+
+        private void queueState(Collection<Player> viewers, EntityState state) {
+            pendingState.set(new StateDelivery(List.copyOf(viewers), state));
+            if (stateScheduled.compareAndSet(false, true)) dispatch(this::drainState);
+        }
+
+        private void drainState() {
+            StateDelivery delivery;
+            while ((delivery = pendingState.getAndSet(null)) != null) sendStateNow(delivery);
+            stateScheduled.set(false);
+            if (pendingState.get() != null && stateScheduled.compareAndSet(false, true)) dispatch(this::drainState);
+        }
+
+        private void sendStateNow(StateDelivery delivery) {
+            EntityState state = delivery.state;
+            List<PacketContainer> packets = movementPackets(state.movement);
+            packets.addFirst(PacketContainer.fromPacket(new ClientboundSetEntityDataPacket(id, state.metadata)));
+            if (state.attributes != null) packets.add(PacketContainer.fromPacket(state.attributes));
+            if (state.supportsAttributes) {
+                AttributeInstance scaled = new AttributeInstance(Attributes.SCALE, ignored -> {});
+                scaled.setBaseValue(Math.max(.0625, Math.min(16.0,
+                        state.sourceScale * state.movement.worldScale)));
+                packets.add(PacketContainer.fromPacket(new ClientboundUpdateAttributesPacket(id, List.of(scaled))));
+            }
+            if (!state.equipment.isEmpty()) {
+                packets.add(PacketContainer.fromPacket(new ClientboundSetEquipmentPacket(id, state.equipment)));
+            }
+            sendNow(delivery.viewers, packets);
+        }
+
+        private List<PacketContainer> movementPackets(MovementState state) {
+            Vec3 velocity = state.velocity.scale(state.worldScale);
+            List<PacketContainer> packets = new ArrayList<>(3);
+            packets.add(PacketContainer.fromPacket(ClientboundTeleportEntityPacket.teleport(id,
+                    new PositionMoveRotation(new Vec3(state.mapping.x(state.sourceX),
+                            state.mapping.y(state.sourceY), state.mapping.z(state.sourceZ)), velocity,
+                            state.yaw, state.pitch), Set.<Relative>of(), state.onGround)));
+            packets.add(state.headRotation);
+            packets.add(PacketContainer.fromPacket(new ClientboundSetEntityMotionPacket(id, velocity)));
+            return packets;
         }
 
         private void syncMovement(Entity source) {
             if (jar == null) return;
-            Location location = mapped(jar, key.side, source.getLocation());
+            Location sourceLocation = source.getLocation();
+            Collection<Player> active = online(viewers);
+            if (active.isEmpty()) return;
             net.minecraft.world.entity.Entity handle = ((CraftEntity) source).getHandle();
-            for (Player viewer : online(viewers)) sendMovement(viewer, handle, location, worldScale);
+            MovementState state = movementState(handle, sourceLocation,
+                    mapping(jar, key.side), worldScale);
+            queueMovement(active, state);
+        }
+
+        private void queueMovement(Collection<Player> viewers, MovementState state) {
+            pendingMovement.set(new MovementDelivery(List.copyOf(viewers), state));
+            if (movementScheduled.compareAndSet(false, true)) dispatch(this::drainMovement);
+        }
+
+        private void drainMovement() {
+            MovementDelivery delivery;
+            while ((delivery = pendingMovement.getAndSet(null)) != null) {
+                sendNow(delivery.viewers, movementPackets(delivery.state));
+            }
+            movementScheduled.set(false);
+            if (pendingMovement.get() != null && movementScheduled.compareAndSet(false, true)) {
+                dispatch(this::drainMovement);
+            }
         }
 
         private Vec3 mappedPoint(Vec3 point) {
@@ -540,7 +724,7 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
                         PacketContainer packet = PacketContainer.fromPacket(new ClientboundSetPassengersPacket(handle));
                         packet.getIntegers().write(0, id);
                         packet.getIntegerArrays().write(0, current.passengers.stream().mapToInt(Integer::intValue).toArray());
-                        protocol.sendServerPacket(viewer, packet, false);
+                        send(List.of(viewer), List.of(packet));
                     }
                 }
                 if (current.leashHolderId != -1
@@ -548,7 +732,7 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
                     if (current.leashHolderId != 0 || previous != null && previous.leashHolderId > 0) {
                         PacketContainer packet = PacketContainer.fromPacket(new ClientboundSetEntityLinkPacket(handle, null));
                         packet.getIntegers().write(0, id).write(1, current.leashHolderId);
-                        protocol.sendServerPacket(viewer, packet, false);
+                        send(List.of(viewer), List.of(packet));
                     }
                 }
                 relationships.put(viewerId, current);
@@ -580,19 +764,13 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
             return team;
         }
 
-        private double renderScale(Entity source, double worldScale) {
-            net.minecraft.world.entity.Entity handle = ((CraftEntity) source).getHandle();
-            double sourceScale = handle instanceof LivingEntity living ? living.getScale() : 1.0;
-            return Math.max(.0625, Math.min(16.0, sourceScale * worldScale));
-        }
-
-        private ClientboundSetEquipmentPacket equipment(LivingEntity living) {
+        private List<Pair<EquipmentSlot, ItemStack>> equipment(LivingEntity living) {
             List<Pair<EquipmentSlot, ItemStack>> equipment = new ArrayList<>();
             for (EquipmentSlot slot : List.of(EquipmentSlot.MAINHAND, EquipmentSlot.OFFHAND, EquipmentSlot.FEET,
                     EquipmentSlot.LEGS, EquipmentSlot.CHEST, EquipmentSlot.HEAD)) {
                 equipment.add(Pair.of(slot, living.getItemBySlot(slot).copy()));
             }
-            return new ClientboundSetEquipmentPacket(id, equipment);
+            return List.copyOf(equipment);
         }
 
         private void destroyAll() {
@@ -625,7 +803,27 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
     }
 
     private enum Side { EXTERIOR, INTERIOR }
-    private record MirrorUpdate(Mirror mirror, Entity source, Location location, double scale) {}
+    private record SourceEntityKey(UUID worldId, int entityId) {}
+    private record MirrorUpdate(Mirror mirror, Entity source, Location sourceLocation,
+                                double scale, CoordinateMapping mapping) {}
     private record MirrorKey(UUID jarId, Side side, UUID sourceId) {}
     private record RelationshipState(List<Integer> passengers, int leashHolderId) {}
+    private record RelayTarget(int entityId, List<Player> viewers) {}
+    private record CoordinateMapping(double scale, double offsetX, double offsetY, double offsetZ) {
+        private double x(double source) { return source * scale + offsetX; }
+        private double y(double source) { return source * scale + offsetY; }
+        private double z(double source) { return source * scale + offsetZ; }
+    }
+    private record SpawnState(double sourceX, double sourceY, double sourceZ, CoordinateMapping mapping,
+                              float pitch, float yaw, net.minecraft.world.entity.EntityType<?> type, int data,
+                              Vec3 velocity, double headYaw, double worldScale) {}
+    private record MovementState(double sourceX, double sourceY, double sourceZ, CoordinateMapping mapping,
+                                 Vec3 velocity, float yaw, float pitch, boolean onGround,
+                                 PacketContainer headRotation, double worldScale) {}
+    private record EntityState(List<SynchedEntityData.DataValue<?>> metadata, MovementState movement,
+                               Packet<ClientGamePacketListener> attributes,
+                               List<Pair<EquipmentSlot, ItemStack>> equipment,
+                               double sourceScale, boolean supportsAttributes) {}
+    private record StateDelivery(List<Player> viewers, EntityState state) {}
+    private record MovementDelivery(List<Player> viewers, MovementState state) {}
 }
