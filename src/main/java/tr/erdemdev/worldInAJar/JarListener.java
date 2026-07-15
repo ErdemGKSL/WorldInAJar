@@ -19,6 +19,8 @@ import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerRespawnEvent;
+import org.bukkit.event.weather.ThunderChangeEvent;
+import org.bukkit.event.weather.WeatherChangeEvent;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.InventoryHolder;
 
@@ -63,8 +65,9 @@ public final class JarListener implements Listener {
         event.getPlayer().sendMessage("§aJar placed. Right-click the side facing you to enter.");
     }
 
-    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    @EventHandler(priority = EventPriority.MONITOR)
     public void onBreak(BlockBreakEvent event) {
+        if (event.isCancelled()) return;
         JarRecord jar = repository.at(event.getBlock().getLocation()).orElse(null);
         if (jar == null) {
             if (repository.all().stream().anyMatch(j -> interiors.isBoundary(j, event.getBlock().getLocation()))) {
@@ -73,14 +76,6 @@ public final class JarListener implements Listener {
                 return;
             }
             invalidateContaining(event.getBlock().getLocation());
-            return;
-        }
-        Player player = event.getPlayer();
-        boolean allowed = player.hasPermission("worldinajar.admin")
-                || (jar.owner().equals(player.getUniqueId()) && player.isSneaking());
-        if (!allowed) {
-            event.setCancelled(true);
-            player.sendMessage("§cOnly the owner can pick up this jar while sneaking.");
             return;
         }
         event.setDropItems(false);
@@ -142,6 +137,16 @@ public final class JarListener implements Listener {
     @EventHandler
     public void onWorldChange(PlayerChangedWorldEvent event) {
         interiors.syncSession(event.getPlayer(), event.getPlayer().getLocation(), repository);
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onInteriorWeather(WeatherChangeEvent event) {
+        if (event.getWorld() == interiors.world() && event.toWeatherState()) event.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onInteriorThunder(ThunderChangeEvent event) {
+        if (event.getWorld() == interiors.world() && event.toThunderState()) event.setCancelled(true);
     }
 
     @EventHandler(ignoreCancelled = true)

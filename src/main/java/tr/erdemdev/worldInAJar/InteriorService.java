@@ -38,6 +38,8 @@ public final class InteriorService {
         if (world == null) throw new IllegalStateException("Paper could not create the jar interior world");
         world.setAutoSave(true);
         world.setGameRule(GameRule.DO_MOB_SPAWNING, plugin.getConfig().getBoolean("interior.mob-spawning", true));
+        world.setGameRule(GameRule.DO_WEATHER_CYCLE, false);
+        clearWeather();
     }
 
     public World world() { return world; }
@@ -87,7 +89,11 @@ public final class InteriorService {
         else if (jar.door() == BlockFace.SOUTH) z = c.minZ() + jar.scale() - margin - .5;
         else if (jar.door() == BlockFace.WEST) x = c.minX() + margin + .5;
         else if (jar.door() == BlockFace.EAST) x = c.minX() + jar.scale() - margin - .5;
-        player.teleport(new Location(world, x, c.minY() + 1.1, z, player.getYaw(), player.getPitch()));
+        if (player.teleport(new Location(world, x, c.minY() + 1.1, z, player.getYaw(), player.getPitch()))) {
+            applyEnvironment(player, jar);
+        } else {
+            sessions.remove(player.getUniqueId());
+        }
     }
 
     public ExitResult exit(Player player, JarRepository repository) {
@@ -98,6 +104,7 @@ public final class InteriorService {
                 .add(jar.door().getModX() * 1.5, 0, jar.door().getModZ() * 1.5);
         if (!player.teleport(destination)) return ExitResult.NOT_INSIDE;
         sessions.remove(player.getUniqueId());
+        resetEnvironment(player);
         return ExitResult.EXITED;
     }
 
@@ -117,25 +124,31 @@ public final class InteriorService {
         return result;
     }
 
-    public void forget(Player player) { sessions.remove(player.getUniqueId()); }
+    public void forget(Player player) {
+        if (sessions.remove(player.getUniqueId()) != null) resetEnvironment(player);
+    }
 
     public JarRecord syncSession(Player player, Location location, JarRepository repository) {
         UUID playerId = player.getUniqueId();
         if (location.getWorld() != world) {
-            sessions.remove(playerId);
+            if (sessions.remove(playerId) != null) resetEnvironment(player);
             return null;
         }
 
         UUID currentId = sessions.get(playerId);
         JarRecord current = currentId == null ? null : repository.byId(currentId).orElse(null);
-        if (current != null && contains(current, location)) return current;
+        if (current != null && contains(current, location)) {
+            applyEnvironment(player, current);
+            return current;
+        }
 
         for (JarRecord jar : repository.all()) {
             if (!contains(jar, location)) continue;
             sessions.put(playerId, jar.id());
+            applyEnvironment(player, jar);
             return jar;
         }
-        sessions.remove(playerId);
+        if (sessions.remove(playerId) != null) resetEnvironment(player);
         return null;
     }
 
@@ -150,6 +163,7 @@ public final class InteriorService {
                     : outside.clone().add(.5, .2, .5)
                     .add(jar.door().getModX() * 1.5, 0, jar.door().getModZ() * 1.5);
             player.teleport(destination);
+            resetEnvironment(player);
         }
 
         CellLayout.Cell c = cell(jar);
@@ -166,6 +180,34 @@ public final class InteriorService {
             return player == null || !player.isOnline();
         });
         for (Player player : Bukkit.getOnlinePlayers()) syncSession(player, player.getLocation(), repository);
+    }
+
+    public void clearWeather() {
+        world.setStorm(false);
+        world.setThundering(false);
+        world.setWeatherDuration(0);
+        world.setThunderDuration(0);
+        world.setClearWeatherDuration(Integer.MAX_VALUE);
+    }
+
+    public void stop() {
+        for (UUID playerId : new ArrayList<>(sessions.keySet())) {
+            Player player = Bukkit.getPlayer(playerId);
+            if (player != null) resetEnvironment(player);
+        }
+        sessions.clear();
+    }
+
+    private void applyEnvironment(Player player, JarRecord jar) {
+        Location outside = jar.outsideLocation();
+        if (outside == null) return;
+        player.setPlayerWeather(WeatherType.CLEAR);
+        player.setPlayerTime(outside.getWorld().getFullTime() - world.getFullTime(), true);
+    }
+
+    private void resetEnvironment(Player player) {
+        player.resetPlayerWeather();
+        player.resetPlayerTime();
     }
 
     public boolean isExitWall(Player player, Location block, JarRepository repository) {

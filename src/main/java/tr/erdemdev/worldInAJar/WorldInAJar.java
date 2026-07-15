@@ -31,6 +31,7 @@ public final class WorldInAJar extends JavaPlugin {
 
     @Override public void onDisable() {
         if (previews != null) previews.stop();
+        if (interiors != null) interiors.stop();
         if (repository != null) repository.save();
         getServer().removeRecipe(recipeKey());
     }

@@ -1,3 +1,7 @@
+# Entity preview backend: manequeen (built-in) or protocol (requires ProtocolLib with 1.21.11 support).
+# "mannequin" is also accepted as an alias for manequeen.
+entity-preview: manequeen
+
 # Interior edge length in blocks. Existing jars retain the scale they were created with.
 jar:
   scale: 32
@@ -24,6 +28,8 @@ preview:
     # Hard caps for virtual interior block displays and occupant mannequins per jar.
     max-blocks: 2048
     max-player-markers: 16
+    # Used by entity-preview: protocol. Includes players, mobs, items and projectiles.
+    max-entities: 64
 
   interior:
     enabled: true
@@ -33,5 +39,7 @@ preview:
     # for the configured radius; blocks are never stretched or substituted to meet this limit.
     max-blocks: 4096
     max-player-markers: 16
+    # Used by entity-preview: protocol. Includes players, mobs, items and projectiles.
+    max-entities: 64
     # Represent nearby outside players with viewer-specific virtual mannequins.
     show-players: true

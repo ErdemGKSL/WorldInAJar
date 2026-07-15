@@ -37,6 +37,7 @@ public final class PreviewService {
     private volatile List<JarRoute> routes = List.of();
     private volatile boolean running;
     private ExecutorService router;
+    private EntityPreviewBackend entityBackend;
     private JarRepository repository;
     private int taskId = -1;
     private long ticks;
@@ -50,6 +51,7 @@ public final class PreviewService {
     public void start(JarRepository repository) {
         stop();
         this.repository = repository;
+        configureEntityBackend();
         running = true;
         router = Executors.newSingleThreadExecutor(runnable -> {
             Thread thread = new Thread(runnable, "WorldInAJar-preview-router");
@@ -64,6 +66,8 @@ public final class PreviewService {
 
     public void stop() {
         running = false;
+        if (entityBackend != null) entityBackend.stop();
+        entityBackend = null;
         if (taskId != -1) plugin.getServer().getScheduler().cancelTask(taskId);
         taskId = -1;
         if (router != null) router.shutdownNow();
@@ -114,6 +118,7 @@ public final class PreviewService {
     }
 
     public void remove(UUID id) {
+        if (entityBackend != null) entityBackend.remove(id);
         JarScene scene = scenes.remove(id);
         if (scene != null) scene.removeAll();
         if (repository != null) rebuildRoutes();
@@ -131,6 +136,7 @@ public final class PreviewService {
 
     public void forget(Player player) {
         UUID id = player.getUniqueId();
+        if (entityBackend != null) entityBackend.forget(id);
         for (JarScene scene : scenes.values()) {
             scene.exteriorViewers.remove(id);
             scene.insetPortalViewers.remove(id);
@@ -148,6 +154,7 @@ public final class PreviewService {
         for (JarRecord jar : repository.all()) {
             valid.add(jar.id());
             if (!jar.placed()) {
+                if (entityBackend != null) entityBackend.remove(jar.id());
                 if (interiors.occupants(jar).isEmpty()) {
                     remove(jar.id());
                     continue;
@@ -181,6 +188,7 @@ public final class PreviewService {
             }
             updateOccupants(scene);
             updateOutsidePlayers(scene);
+            if (entityBackend != null) entityBackend.update(jar, scene.exteriorViewers, scene.interiorViewers);
         }
         for (UUID id : new ArrayList<>(scenes.keySet())) if (!valid.contains(id)) remove(id);
     }
@@ -484,7 +492,8 @@ public final class PreviewService {
         showTo(scene.interiorViewers, scene.interiorBlocks);
         removeEntities(stale, scene.interiorViewers);
         scene.sealed = true;
-        scene.invalid = false;
+        scene.exteriorInvalid = false;
+        scene.interiorInvalid = false;
     }
 
     private void spawnSurface(JarScene scene, Location center, BlockData blockData, Matrix4f transformation) {
@@ -499,6 +508,10 @@ public final class PreviewService {
     }
 
     private void updateOccupants(JarScene scene) {
+        if (entityBackend != null) {
+            removeAbsent(scene, scene.occupants, Set.of());
+            return;
+        }
         Set<UUID> present = new HashSet<>();
         CellLayout.Cell cell = interiors.cell(scene.jar);
         int maximum = bounded("preview.exterior.max-player-markers", 16, 0, 100);
@@ -515,6 +528,10 @@ public final class PreviewService {
     }
 
     private void updateOutsidePlayers(JarScene scene) {
+        if (entityBackend != null) {
+            removeAbsent(scene, scene.outsiders, Set.of());
+            return;
+        }
         if (!plugin.getConfig().getBoolean("preview.interior.show-players", true)) {
             removeAbsent(scene, scene.outsiders, Set.of());
             return;
@@ -613,9 +630,115 @@ public final class PreviewService {
         }
     }
 
+    private void configureEntityBackend() {
+        String mode = plugin.getConfig().getString("entity-preview",
+                plugin.getConfig().getString("preview.entity-preview", "manequeen"));
+        if (mode == null) return;
+        mode = mode.trim();
+        if (mode.equalsIgnoreCase("manequeen") || mode.equalsIgnoreCase("mannequin")) return;
+        if (!mode.equalsIgnoreCase("protocol")) {
+            plugin.getLogger().warning("Unknown entity-preview mode '" + mode + "'; using manequeens.");
+            return;
+        }
+        org.bukkit.plugin.Plugin protocolLib = plugin.getServer().getPluginManager().getPlugin("ProtocolLib");
+        if (protocolLib == null || !protocolLib.isEnabled()) {
+            plugin.getLogger().warning("entity-preview is protocol, but ProtocolLib is not enabled; using mannequins.");
+            return;
+        }
+        try {
+            entityBackend = new ProtocolEntityPreview(plugin, interiors);
+            plugin.getLogger().info("Using ProtocolLib entity previews.");
+        } catch (LinkageError | RuntimeException exception) {
+            entityBackend = null;
+            plugin.getLogger().warning("Could not start ProtocolLib entity previews; using mannequins: " + exception.getMessage());
+        }
+    }
+
+    private void rebuildRoutes() {
+        if (repository == null) {
+            routes = List.of();
+            return;
+        }
+        UUID interiorWorld = interiors.world().getUID();
+        int radius = bounded("preview.interior.outside-radius", 6, 1, 24);
+        List<JarRoute> snapshots = new ArrayList<>();
+        for (JarRecord jar : repository.all()) {
+            Location outside = jar.outsideLocation();
+            if (outside == null) continue;
+            CellLayout.Cell cell = interiors.cell(jar);
+            snapshots.add(new JarRoute(jar.id(), outside.getWorld().getUID(), outside.getBlockX(),
+                    outside.getBlockY(), outside.getBlockZ(), radius, interiorWorld,
+                    cell.minX(), cell.minY(), cell.minZ(), jar.scale()));
+        }
+        routes = List.copyOf(snapshots);
+    }
+
+    private void scheduleRoute() {
+        ExecutorService executor = router;
+        if (!running || executor == null || !routeScheduled.compareAndSet(false, true)) return;
+        executor.execute(() -> {
+            try {
+                List<JarRoute> snapshot = routes;
+                for (BlockRequest block : new ArrayList<>(pendingBlocks)) {
+                    if (!pendingBlocks.remove(block)) continue;
+                    for (JarRoute route : snapshot) {
+                        int mask = route.route(block);
+                        if (mask != 0) routedBlocks.merge(route.jarId, mask, (left, right) -> left | right);
+                    }
+                }
+                for (UUID player : new ArrayList<>(pendingPlayers)) {
+                    if (pendingPlayers.remove(player)) routedPlayers.add(player);
+                }
+            } finally {
+                routeScheduled.set(false);
+                scheduleApply();
+                if (!pendingBlocks.isEmpty() || !pendingPlayers.isEmpty()) scheduleRoute();
+            }
+        });
+    }
+
+    private void scheduleApply() {
+        if (!running || !applyScheduled.compareAndSet(false, true)) return;
+        plugin.getServer().getScheduler().runTask(plugin, () -> {
+            try {
+                for (Map.Entry<UUID, Integer> entry : new HashMap<>(routedBlocks).entrySet()) {
+                    if (!routedBlocks.remove(entry.getKey(), entry.getValue())) continue;
+                    JarScene scene = scenes.get(entry.getKey());
+                    if (scene == null) continue;
+                    if ((entry.getValue() & EXTERIOR_BLOCKS) != 0) scene.exteriorInvalid = true;
+                    if ((entry.getValue() & INTERIOR_BLOCKS) != 0) scene.interiorInvalid = true;
+                }
+                for (UUID playerId : new HashSet<>(routedPlayers)) {
+                    if (!routedPlayers.remove(playerId)) continue;
+                    Player player = Bukkit.getPlayer(playerId);
+                    if (player != null) interiors.syncSession(player, player.getLocation(), repository);
+                }
+            } finally {
+                applyScheduled.set(false);
+                if (!routedBlocks.isEmpty() || !routedPlayers.isEmpty()) scheduleApply();
+            }
+        });
+    }
+
     private record InteriorBox(int x, int y, int z, int sx, int sy, int sz, Material material) {}
     private record OutsideSample(int dx, int dy, int dz, BlockData blockData) {}
     private record OutsideOffset(int dx, int dy, int dz, int distanceSquared) {}
+    private record BlockRequest(UUID world, int x, int y, int z) {}
+    private record JarRoute(UUID jarId, UUID outsideWorld, int outsideX, int outsideY, int outsideZ,
+                            int outsideRadius, UUID interiorWorld, int minX, int minY, int minZ, int scale) {
+        private int route(BlockRequest block) {
+            int mask = 0;
+            if (block.world.equals(interiorWorld)
+                    && block.x >= minX && block.x < minX + scale
+                    && block.y >= minY && block.y < minY + scale
+                    && block.z >= minZ && block.z < minZ + scale) mask |= EXTERIOR_BLOCKS;
+            if (block.world.equals(outsideWorld)
+                    && Math.abs(block.x - outsideX) <= outsideRadius
+                    && Math.abs(block.y - outsideY) <= outsideRadius
+                    && Math.abs(block.z - outsideZ) <= outsideRadius) mask |= INTERIOR_BLOCKS;
+            return mask;
+        }
+    }
     private record Avatar(VirtualMannequin body) {}
 
     private final class JarScene {
@@ -630,7 +753,8 @@ public final class PreviewService {
         private final Set<UUID> insetPortalViewers = new HashSet<>();
         private int exteriorFingerprint = Integer.MIN_VALUE;
         private int interiorFingerprint = Integer.MIN_VALUE;
-        private boolean invalid = true;
+        private volatile boolean exteriorInvalid = true;
+        private volatile boolean interiorInvalid = true;
         private boolean sealed;
 
         private JarScene(JarRecord jar) { this.jar = jar; }

@@ -4,6 +4,7 @@ main: tr.erdemdev.worldInAJar.WorldInAJar
 api-version: '1.21.11'
 load: POSTWORLD
 description: Persistent, enterable miniature worlds inside craftable glass jars.
+softdepend: [ProtocolLib]
 commands:
   jar:
     description: Manage World in a Jar
