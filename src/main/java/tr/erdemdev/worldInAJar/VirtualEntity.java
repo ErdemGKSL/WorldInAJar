@@ -5,18 +5,22 @@ import com.mojang.math.Transformation;
 import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.game.ClientGamePacketListener;
 import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;
+import net.minecraft.network.protocol.game.ClientboundAnimatePacket;
+import net.minecraft.network.protocol.game.ClientboundEntityPositionSyncPacket;
+import net.minecraft.network.protocol.game.ClientboundHurtAnimationPacket;
 import net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket;
 import net.minecraft.network.protocol.game.ClientboundRotateHeadPacket;
 import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket;
 import net.minecraft.network.protocol.game.ClientboundSetEquipmentPacket;
-import net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundUpdateAttributesPacket;
+import net.minecraft.network.syncher.SynchedEntityData;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.entity.Avatar;
 import net.minecraft.world.entity.Display;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EquipmentSlot;
-import net.minecraft.world.entity.PositionMoveRotation;
-import net.minecraft.world.entity.Relative;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.decoration.Mannequin;
@@ -27,13 +31,13 @@ import org.bukkit.Location;
 import org.bukkit.block.data.BlockData;
 import org.bukkit.craftbukkit.block.data.CraftBlockData;
 import org.bukkit.craftbukkit.entity.CraftPlayer;
+import org.bukkit.craftbukkit.CraftWorld;
 import org.bukkit.entity.Player;
 import org.joml.Matrix4f;
 
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
-import java.util.Set;
 
 /** A client-side entity definition which is never registered with a world or chunk. */
 abstract class VirtualEntity {
@@ -59,14 +63,17 @@ abstract class VirtualEntity {
         send(viewer, new ClientboundRemoveEntitiesPacket(handle.getId()));
     }
 
-    protected void teleport(Collection<Player> viewers, Location location) {
+    protected void positionSync(Collection<Player> viewers, Location location, float headYaw,
+                                Vec3 movement, boolean onGround) {
         moveHandle(location);
-        Packet<ClientGamePacketListener> teleport = ClientboundTeleportEntityPacket.teleport(
-                handle.getId(), PositionMoveRotation.of(handle), Set.of(), false);
+        handle.setYHeadRot(headYaw);
+        handle.setDeltaMovement(movement);
+        handle.setOnGround(onGround);
+        Packet<ClientGamePacketListener> position = ClientboundEntityPositionSyncPacket.of(handle);
         Packet<ClientGamePacketListener> head = new ClientboundRotateHeadPacket(handle,
                 net.minecraft.util.Mth.packDegrees(handle.getYHeadRot()));
         for (Player viewer : viewers) {
-            send(viewer, teleport);
+            send(viewer, position);
             send(viewer, head);
         }
     }
@@ -74,6 +81,13 @@ abstract class VirtualEntity {
     protected void metadata(Collection<Player> viewers) {
         Packet<ClientGamePacketListener> packet = new ClientboundSetEntityDataPacket(
                 handle.getId(), handle.getEntityData().packAll());
+        for (Player viewer : viewers) send(viewer, packet);
+    }
+
+    protected void dirtyMetadata(Collection<Player> viewers) {
+        List<SynchedEntityData.DataValue<?>> values = handle.getEntityData().packDirty();
+        if (values == null || values.isEmpty()) return;
+        Packet<ClientGamePacketListener> packet = new ClientboundSetEntityDataPacket(handle.getId(), values);
         for (Player viewer : viewers) send(viewer, packet);
     }
 
@@ -120,16 +134,22 @@ final class VirtualBlockDisplay extends VirtualEntity {
 
 final class VirtualMannequin extends VirtualEntity {
     private final Mannequin mannequin;
+    private final float movementScale;
+    private List<SynchedEntityData.DataValue<?>> sharedMetadata = List.of();
     private int equipmentFingerprint;
-    private net.minecraft.world.entity.Pose pose;
+    private boolean swinging;
+    private int swingTime;
+    private int hurtTime;
 
     VirtualMannequin(Player target, Location location, float scale) {
-        this(new Mannequin(EntityType.MANNEQUIN, null), target, location, scale);
+        this(new Mannequin(EntityType.MANNEQUIN,
+                ((CraftWorld) location.getWorld()).getHandle()), target, location, scale);
     }
 
     private VirtualMannequin(Mannequin mannequin, Player target, Location location, float scale) {
         super(mannequin, location);
         this.mannequin = mannequin;
+        this.movementScale = scale;
         mannequin.setProfile(ResolvableProfile.createResolved(((CraftPlayer) target).getHandle().getGameProfile()));
         mannequin.setImmovable(true);
         mannequin.setNoGravity(true);
@@ -142,14 +162,33 @@ final class VirtualMannequin extends VirtualEntity {
     }
 
     void update(Player target, Location location, Collection<Player> viewers) {
-        teleport(viewers, location);
-        net.minecraft.world.entity.Pose oldPose = pose;
+        net.minecraft.server.level.ServerPlayer source = ((CraftPlayer) target).getHandle();
         int oldEquipment = equipmentFingerprint;
-        updateState(target);
-        if (pose != oldPose) metadata(viewers);
+        boolean oldSwinging = swinging;
+        int oldSwingTime = swingTime;
+        int oldHurtTime = hurtTime;
+        List<SynchedEntityData.DataValue<?>> oldSharedMetadata = sharedMetadata;
+        updateState(source);
+
+        location.setYaw(source.yBodyRot);
+        location.setPitch(source.getXRot());
+        positionSync(viewers, location, source.getYHeadRot(),
+                source.getDeltaMovement().scale(movementScale), source.onGround());
+        if (!sharedMetadata.equals(oldSharedMetadata)) {
+            sendTo(viewers, new ClientboundSetEntityDataPacket(id(), sharedMetadata));
+        }
+        dirtyMetadata(viewers);
         if (equipmentFingerprint != oldEquipment) {
             Packet<ClientGamePacketListener> packet = equipmentPacket();
             for (Player viewer : viewers) send(viewer, packet);
+        }
+        if (swinging && (!oldSwinging || swingTime < oldSwingTime)) {
+            int action = source.swingingArm == InteractionHand.OFF_HAND
+                    ? ClientboundAnimatePacket.SWING_OFF_HAND : ClientboundAnimatePacket.SWING_MAIN_HAND;
+            sendTo(viewers, new ClientboundAnimatePacket(mannequin, action));
+        }
+        if (hurtTime > oldHurtTime) {
+            sendTo(viewers, new ClientboundHurtAnimationPacket(id(), source.getHurtDir()));
         }
     }
 
@@ -162,10 +201,35 @@ final class VirtualMannequin extends VirtualEntity {
     }
 
     private void updateState(Player target) {
-        net.minecraft.server.level.ServerPlayer source = ((CraftPlayer) target).getHandle();
-        net.minecraft.world.entity.Pose requested = net.minecraft.world.entity.Pose.valueOf(target.getPose().name());
-        pose = Mannequin.VALID_POSES.contains(requested) ? requested : net.minecraft.world.entity.Pose.STANDING;
-        mannequin.setPose(pose);
+        updateState(((CraftPlayer) target).getHandle());
+    }
+
+    private void updateState(net.minecraft.server.level.ServerPlayer source) {
+        net.minecraft.world.entity.Pose requested = source.getPose();
+        mannequin.setPose(Mannequin.VALID_POSES.contains(requested)
+                ? requested : net.minecraft.world.entity.Pose.STANDING);
+        mannequin.setMainArm(source.getMainArm());
+        mannequin.getEntityData().set(Avatar.DATA_PLAYER_MODE_CUSTOMISATION,
+                source.getEntityData().get(Avatar.DATA_PLAYER_MODE_CUSTOMISATION));
+
+        mannequin.setSharedFlagOnFire(source.isOnFire());
+        mannequin.setShiftKeyDown(source.isShiftKeyDown());
+        mannequin.setSprinting(source.isSprinting());
+        mannequin.setSwimming(source.isSwimming());
+        mannequin.setInvisible(source.isInvisible());
+        mannequin.setGlowingTag(source.hasGlowingTag());
+        mannequin.setSharedFlag(7, source.getSharedFlag(7));
+        mannequin.setLivingEntityFlag(1, source.isUsingItem());
+        mannequin.setLivingEntityFlag(2,
+                source.isUsingItem() && source.getUsedItemHand() == InteractionHand.OFF_HAND);
+        mannequin.setLivingEntityFlag(4, source.isAutoSpinAttack());
+        mannequin.setAirSupply(source.getAirSupply());
+        mannequin.setTicksFrozen(source.getTicksFrozen());
+        mannequin.setHealth(source.getHealth());
+        mannequin.setArrowCount(source.getArrowCount(), false);
+        mannequin.setStingerCount(source.getStingerCount());
+        copySharedMetadata(source);
+
         int fingerprint = 1;
         for (EquipmentSlot slot : visibleSlots()) {
             ItemStack item = source.getItemBySlot(slot);
@@ -173,6 +237,20 @@ final class VirtualMannequin extends VirtualEntity {
             fingerprint = 31 * fingerprint + ItemStack.hashItemAndComponents(item);
         }
         equipmentFingerprint = fingerprint;
+        swinging = source.swinging;
+        swingTime = source.swingTime;
+        hurtTime = source.hurtTime;
+    }
+
+    private void copySharedMetadata(net.minecraft.server.level.ServerPlayer source) {
+        int firstLivingValue = LivingEntity.DATA_HEALTH_ID.id();
+        int lastAvatarValue = Avatar.DATA_PLAYER_MODE_CUSTOMISATION.id();
+        List<SynchedEntityData.DataValue<?>> values = source.getEntityData().packAll().stream()
+                .filter(value -> value.id() >= firstLivingValue && value.id() <= lastAvatarValue)
+                .toList();
+        if (values.equals(sharedMetadata)) return;
+        mannequin.getEntityData().assignValues(values);
+        sharedMetadata = values;
     }
 
     private ClientboundSetEquipmentPacket equipmentPacket() {
@@ -184,5 +262,9 @@ final class VirtualMannequin extends VirtualEntity {
     private static List<EquipmentSlot> visibleSlots() {
         return List.of(EquipmentSlot.MAINHAND, EquipmentSlot.OFFHAND, EquipmentSlot.FEET,
                 EquipmentSlot.LEGS, EquipmentSlot.CHEST, EquipmentSlot.HEAD);
+    }
+
+    private static void sendTo(Collection<Player> viewers, Packet<ClientGamePacketListener> packet) {
+        for (Player viewer : viewers) send(viewer, packet);
     }
 }

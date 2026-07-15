@@ -471,11 +471,6 @@ public final class PreviewService {
             if (target.getLocation().distanceSquared(jar) > radius * radius) continue;
             present.add(target.getUniqueId());
             Location mapped = mapOutsideLocation(scene.jar, target.getLocation());
-            // Skip markers that map into unloaded chunks; the display would be discarded instantly.
-            if (!mapped.getWorld().isChunkLoaded(mapped.getBlockX() >> 4, mapped.getBlockZ() >> 4)) {
-                present.remove(target.getUniqueId());
-                continue;
-            }
             // An outside player is scale times larger than an occupant.
             updateAvatar(scene, scene.outsiders, target, mapped, scene.jar.scale(), scene.interiorViewers);
         }
@@ -489,7 +484,7 @@ public final class PreviewService {
         double dx = outside.getX() - block.getX(), dy = outside.getY() - block.getY(), dz = outside.getZ() - block.getZ();
         // Feet position of the outside player, scaled up; the mannequin body extends from there.
         return new Location(interiors.world(), cell.minX() + dx * scale,
-                cell.minY() + dy * scale, cell.minZ() + dz * scale);
+                cell.minY() + 1 + dy * scale, cell.minZ() + dz * scale);
     }
 
     /** Mirrors a real player as a scaled mannequin: full model, skin, name, pose and equipment.
