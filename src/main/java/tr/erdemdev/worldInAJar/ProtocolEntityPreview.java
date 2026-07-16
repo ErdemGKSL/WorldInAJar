@@ -82,7 +82,8 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
     private final ProtocolManager protocol;
     private final Map<MirrorKey, Mirror> mirrors = new HashMap<>();
     private final Map<SourceEntityKey, Integer> mirroredSources = new ConcurrentHashMap<>();
-    private final Set<Integer> forwardedHandles = ConcurrentHashMap.newKeySet();
+    private final Map<Integer, Integer> mirroredEntityIds = new ConcurrentHashMap<>();
+    private final Set<PacketIdentity> forwardedHandles = ConcurrentHashMap.newKeySet();
     private final ExecutorService packetExecutor;
     private final PacketAdapter eventPipe;
     private final int exteriorMaximum;
@@ -117,29 +118,41 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
             public void onPacketSending(PacketEvent event) {
                 Integer sourceId = event.getPacket().getIntegers().readSafely(0);
                 if (sourceId == null) return;
-                UUID sourceWorldId = event.getPlayer().getWorld().getUID();
-                if (!mirroredSources.containsKey(new SourceEntityKey(sourceWorldId, sourceId))) return;
+                // The callback may be on a network thread. This concurrent, world-agnostic index is only
+                // a cheap prefilter; the exact world check is made later on the server thread.
+                if (!mirroredEntityIds.containsKey(sourceId)) return;
                 PacketType packetType = event.getPacketType();
-                int token = System.identityHashCode(event.getPacket().getHandle());
-                if (!forwardedHandles.add(token)) return;
+                PacketIdentity packetIdentity = new PacketIdentity(event.getPacket().getHandle());
+                if (!forwardedHandles.add(packetIdentity)) return;
                 PacketContainer packet = MOVEMENT_PACKETS.contains(packetType)
                         || RELATIONSHIP_PACKETS.contains(packetType) ? null : event.getPacket().deepClone();
-                plugin.getServer().getScheduler().runTask(plugin, () -> {
-                    forwardedHandles.remove(token);
-                    if (MOVEMENT_PACKETS.contains(packetType)) {
-                        relayMovement(sourceWorldId, sourceId);
-                    } else if (RELATIONSHIP_PACKETS.contains(packetType)) {
-                        relayRelationships(sourceWorldId, sourceId);
-                    } else if (packetType.equals(PacketType.Play.Server.PROJECTILE_POWER)) {
-                        relayProjectilePower(sourceWorldId, sourceId, packet);
-                    } else if (packetType.equals(PacketType.Play.Server.DAMAGE_EVENT)) {
-                        relayDamage(sourceWorldId, sourceId, packet);
-                    } else if (packetType.equals(PacketType.Play.Server.COLLECT)) {
-                        relayCollect(sourceWorldId, sourceId, packet);
-                    } else if (packetType.equals(PacketType.Play.Server.ENTITY_METADATA)) {
-                        relayMetadata(sourceWorldId, sourceId, packet);
-                    } else {
-                        relay(sourceWorldId, sourceId, packet);
+                UUID packetViewerId = event.getPlayer().getUniqueId();
+                runOnMain(() -> {
+                    try {
+                        Player packetViewer = Bukkit.getPlayer(packetViewerId);
+                        if (packetViewer == null) return;
+                        UUID sourceWorldId = packetViewer.getWorld().getUID();
+                        if (!mirroredSources.containsKey(new SourceEntityKey(sourceWorldId, sourceId))) return;
+                        if (MOVEMENT_PACKETS.contains(packetType)) {
+                            relayMovement(sourceWorldId, sourceId);
+                        } else if (RELATIONSHIP_PACKETS.contains(packetType)) {
+                            relayRelationships(sourceWorldId, sourceId);
+                        } else if (packetType.equals(PacketType.Play.Server.PROJECTILE_POWER)) {
+                            relayProjectilePower(sourceWorldId, sourceId, packet);
+                        } else if (packetType.equals(PacketType.Play.Server.DAMAGE_EVENT)) {
+                            relayDamage(sourceWorldId, sourceId, packet);
+                        } else if (packetType.equals(PacketType.Play.Server.COLLECT)) {
+                            relayCollect(sourceWorldId, sourceId, packet);
+                        } else if (packetType.equals(PacketType.Play.Server.ENTITY_METADATA)) {
+                            relayMetadata(sourceWorldId, sourceId, packet);
+                        } else {
+                            relay(sourceWorldId, sourceId, packet);
+                        }
+                    } finally {
+                        // Keep the handle marked through this tick: the server can send one packet object to
+                        // several viewers and it must only be mirrored once.
+                        if (running) plugin.getServer().getScheduler().runTask(plugin,
+                                () -> forwardedHandles.remove(packetIdentity));
                     }
                 });
             }
@@ -276,6 +289,7 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
         for (Mirror mirror : mirrors.values()) mirror.destroyAll();
         mirrors.clear();
         mirroredSources.clear();
+        mirroredEntityIds.clear();
         running = false;
         packetExecutor.shutdown();
     }
@@ -290,10 +304,13 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
 
     private void registerSource(SourceEntityKey source) {
         mirroredSources.merge(source, 1, Integer::sum);
+        mirroredEntityIds.merge(source.entityId, 1, Integer::sum);
     }
 
     private void unregisterSource(SourceEntityKey source) {
         mirroredSources.computeIfPresent(source, (ignored, count) -> count == 1 ? null : count - 1);
+        mirroredEntityIds.computeIfPresent(source.entityId,
+                (ignored, count) -> count == 1 ? null : count - 1);
     }
 
     private void relay(UUID sourceWorldId, int sourceId, PacketContainer sourcePacket) {
@@ -330,51 +347,67 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
 
     private void relayProjectilePower(UUID sourceWorldId, int sourceId, PacketContainer sourcePacket) {
         if (!(sourcePacket.getHandle() instanceof ClientboundProjectilePowerPacket original)) return;
+        List<ScaledRelayTarget> targets = new ArrayList<>();
         for (Mirror mirror : mirrors.values()) {
             if (!mirror.matchesSource(sourceWorldId, sourceId)) continue;
-            Packet<ClientGamePacketListener> packet = new ClientboundProjectilePowerPacket(
-                    mirror.id, original.getAccelerationPower() * mirror.worldScale);
-            for (Player viewer : online(mirror.viewers)) send(viewer, packet);
+            List<Player> viewers = List.copyOf(online(mirror.viewers));
+            if (!viewers.isEmpty()) targets.add(new ScaledRelayTarget(
+                    mirror.id, mirror.worldScale, viewers));
         }
+        double accelerationPower = original.getAccelerationPower();
+        dispatch(() -> targets.forEach(target -> sendNow(target.viewers, List.of(PacketContainer.fromPacket(
+                new ClientboundProjectilePowerPacket(target.entityId,
+                        accelerationPower * target.worldScale))))));
     }
 
     private void relayDamage(UUID sourceWorldId, int sourceId, PacketContainer sourcePacket) {
         if (!(sourcePacket.getHandle() instanceof ClientboundDamageEventPacket original)) return;
+        List<DamageRelayTarget> targets = new ArrayList<>();
         for (Mirror mirror : mirrors.values()) {
             if (!mirror.matchesSource(sourceWorldId, sourceId)) continue;
             int causeId = remappedId(mirror.key, sourceWorldId, original.sourceCauseId());
             int directId = remappedId(mirror.key, sourceWorldId, original.sourceDirectId());
-            Packet<ClientGamePacketListener> packet = new ClientboundDamageEventPacket(mirror.id,
-                    original.sourceType(), causeId, directId, original.sourcePosition().map(mirror::mappedPoint));
-            for (Player viewer : online(mirror.viewers)) send(viewer, packet);
+            List<Player> viewers = List.copyOf(online(mirror.viewers));
+            if (!viewers.isEmpty()) targets.add(new DamageRelayTarget(mirror.id, causeId, directId,
+                    original.sourcePosition().map(mirror::mappedPoint), viewers));
         }
+        dispatch(() -> targets.forEach(target -> sendNow(target.viewers, List.of(PacketContainer.fromPacket(
+                new ClientboundDamageEventPacket(target.entityId, original.sourceType(), target.causeId,
+                        target.directId, target.sourcePosition))))));
     }
 
     private void relayCollect(UUID sourceWorldId, int sourceId, PacketContainer sourcePacket) {
         if (!(sourcePacket.getHandle() instanceof ClientboundTakeItemEntityPacket original)) return;
+        List<CollectRelayTarget> targets = new ArrayList<>();
         for (Mirror item : mirrors.values()) {
             if (!item.matchesStoredSource(sourceWorldId, sourceId)) continue;
             Mirror collector = mirrorBySourceId(item.key, sourceWorldId, original.getPlayerId());
             if (collector == null) continue;
-            Packet<ClientGamePacketListener> packet = new ClientboundTakeItemEntityPacket(
-                    item.id, collector.id, original.getAmount());
+            List<Player> viewers = new ArrayList<>();
             for (Player viewer : online(item.viewers)) {
-                if (collector.viewers.contains(viewer.getUniqueId())) send(viewer, packet);
+                if (collector.viewers.contains(viewer.getUniqueId())) viewers.add(viewer);
             }
+            if (!viewers.isEmpty()) targets.add(new CollectRelayTarget(
+                    item.id, collector.id, original.getAmount(), List.copyOf(viewers)));
         }
+        dispatch(() -> targets.forEach(target -> sendNow(target.viewers, List.of(PacketContainer.fromPacket(
+                new ClientboundTakeItemEntityPacket(target.entityId, target.collectorId, target.amount))))));
     }
 
     private void relayMetadata(UUID sourceWorldId, int sourceId, PacketContainer sourcePacket) {
         if (!(sourcePacket.getHandle() instanceof ClientboundSetEntityDataPacket original)) return;
+        List<MetadataRelayTarget> targets = new ArrayList<>();
         for (Mirror mirror : mirrors.values()) {
             if (!mirror.matchesSource(sourceWorldId, sourceId)) continue;
             Entity source = Bukkit.getEntity(mirror.sourceUuid);
             if (source == null) continue;
             net.minecraft.world.entity.Entity handle = ((CraftEntity) source).getHandle();
-            Packet<ClientGamePacketListener> packet = new ClientboundSetEntityDataPacket(
-                    mirror.id, hiddenNametagMetadata(handle, original.packedItems()));
-            for (Player viewer : online(mirror.viewers)) send(viewer, packet);
+            List<Player> viewers = List.copyOf(online(mirror.viewers));
+            if (!viewers.isEmpty()) targets.add(new MetadataRelayTarget(mirror.id,
+                    List.copyOf(hiddenNametagMetadata(handle, original.packedItems())), viewers));
         }
+        dispatch(() -> targets.forEach(target -> sendNow(target.viewers, List.of(PacketContainer.fromPacket(
+                new ClientboundSetEntityDataPacket(target.entityId, target.metadata))))));
     }
 
     private static List<SynchedEntityData.DataValue<?>> hiddenNametagMetadata(
@@ -473,6 +506,15 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
             });
         } catch (RejectedExecutionException ignored) {
             // The plugin is stopping and no more preview packets should be sent.
+        }
+    }
+
+    private void runOnMain(Runnable task) {
+        if (!running) return;
+        if (Bukkit.isPrimaryThread()) {
+            task.run();
+        } else {
+            plugin.getServer().getScheduler().runTask(plugin, task);
         }
     }
 
@@ -804,11 +846,28 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
 
     private enum Side { EXTERIOR, INTERIOR }
     private record SourceEntityKey(UUID worldId, int entityId) {}
+    private record PacketIdentity(Object handle) {
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof PacketIdentity identity && handle == identity.handle;
+        }
+
+        @Override
+        public int hashCode() {
+            return System.identityHashCode(handle);
+        }
+    }
     private record MirrorUpdate(Mirror mirror, Entity source, Location sourceLocation,
                                 double scale, CoordinateMapping mapping) {}
     private record MirrorKey(UUID jarId, Side side, UUID sourceId) {}
     private record RelationshipState(List<Integer> passengers, int leashHolderId) {}
     private record RelayTarget(int entityId, List<Player> viewers) {}
+    private record ScaledRelayTarget(int entityId, double worldScale, List<Player> viewers) {}
+    private record DamageRelayTarget(int entityId, int causeId, int directId, Optional<Vec3> sourcePosition,
+                                     List<Player> viewers) {}
+    private record CollectRelayTarget(int entityId, int collectorId, int amount, List<Player> viewers) {}
+    private record MetadataRelayTarget(int entityId, List<SynchedEntityData.DataValue<?>> metadata,
+                                       List<Player> viewers) {}
     private record CoordinateMapping(double scale, double offsetX, double offsetY, double offsetZ) {
         private double x(double source) { return source * scale + offsetX; }
         private double y(double source) { return source * scale + offsetY; }
