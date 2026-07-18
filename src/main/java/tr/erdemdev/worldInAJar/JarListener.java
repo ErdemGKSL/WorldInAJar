@@ -23,6 +23,7 @@ import org.bukkit.event.player.PlayerChangedWorldEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
+import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
@@ -352,6 +353,12 @@ public final class JarListener implements Listener {
         if (!(event.getEntity() instanceof Item item) || !destructive(event.getCause())) return;
         UUID id = items.id(item.getItemStack());
         if (id != null) checkDeletedNextTick(id);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onPlayerDropItem(PlayerDropItemEvent event) {
+        UUID id = items.id(event.getItemDrop().getItemStack());
+        if (id != null) spectators.carrierDropped(event.getPlayer(), id);
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)

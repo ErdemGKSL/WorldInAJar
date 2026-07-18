@@ -128,6 +128,17 @@ public final class SpectatorService {
         save();
     }
 
+    public void carrierDropped(Player carrier, UUID jarId) {
+        UUID carrierId = carrier.getUniqueId();
+        for (UUID spectatorId : new ArrayList<>(active)) {
+            SpectatorRecovery recovery = recoveries.get(spectatorId);
+            if (recovery == null || !jarId.equals(recovery.jarId())
+                    || !carrierId.equals(recovery.carrierId())) continue;
+            Player spectator = Bukkit.getPlayer(spectatorId);
+            if (spectator != null && spectator.isOnline()) restore(spectator, recovery);
+        }
+    }
+
     public void placed(JarRecord jar) {
         forJar(jar.id(), (playerId, recovery) -> {
             Player player = Bukkit.getPlayer(playerId);
