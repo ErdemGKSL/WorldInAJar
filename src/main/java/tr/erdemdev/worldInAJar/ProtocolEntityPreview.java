@@ -70,11 +70,6 @@ import java.util.concurrent.ConcurrentHashMap;
 /** Same-type, client-only entity mirrors transmitted through ProtocolLib. */
 final class ProtocolEntityPreview implements EntityPreviewBackend {
     private static final AtomicInteger IDS = new AtomicInteger(1_900_000_000);
-    private static final Set<PacketType> MOVEMENT_PACKETS = Set.of(
-            PacketType.Play.Server.ENTITY_POSITION_SYNC, PacketType.Play.Server.REL_ENTITY_MOVE,
-            PacketType.Play.Server.REL_ENTITY_MOVE_LOOK, PacketType.Play.Server.ENTITY_LOOK,
-            PacketType.Play.Server.MOVE_MINECART, PacketType.Play.Server.ENTITY_VELOCITY,
-            PacketType.Play.Server.ENTITY_TELEPORT);
     private static final Set<PacketType> RELATIONSHIP_PACKETS = Set.of(
             PacketType.Play.Server.ATTACH_ENTITY, PacketType.Play.Server.MOUNT);
     private final JavaPlugin plugin;
@@ -89,6 +84,7 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
     private final int exteriorMaximum;
     private final int interiorMaximum;
     private final int outsideRadius;
+    private final int movementTaskId;
     private volatile boolean running = true;
 
     ProtocolEntityPreview(JavaPlugin plugin, InteriorService interiors) {
@@ -103,16 +99,16 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
             thread.setDaemon(true);
             return thread;
         });
+        // Movement is deliberately not intercepted: movement packets are only emitted for sources
+        // some player already tracks in their own world, which is rarely true for jar interiors.
+        // The per-tick movement task below syncs every mirror at full tick rate instead.
         this.eventPipe = new PacketAdapter(plugin, List.of(PacketType.Play.Server.ANIMATION,
                 PacketType.Play.Server.ENTITY_STATUS, PacketType.Play.Server.HURT_ANIMATION,
                 PacketType.Play.Server.ENTITY_EFFECT, PacketType.Play.Server.REMOVE_ENTITY_EFFECT,
                 PacketType.Play.Server.ENTITY_EQUIPMENT, PacketType.Play.Server.ENTITY_METADATA,
                 PacketType.Play.Server.ENTITY_HEAD_ROTATION, PacketType.Play.Server.ENTITY_SOUND,
                 PacketType.Play.Server.PROJECTILE_POWER, PacketType.Play.Server.DAMAGE_EVENT,
-                PacketType.Play.Server.COLLECT, PacketType.Play.Server.ENTITY_POSITION_SYNC,
-                PacketType.Play.Server.REL_ENTITY_MOVE, PacketType.Play.Server.REL_ENTITY_MOVE_LOOK,
-                PacketType.Play.Server.ENTITY_LOOK, PacketType.Play.Server.MOVE_MINECART,
-                PacketType.Play.Server.ENTITY_VELOCITY, PacketType.Play.Server.ENTITY_TELEPORT,
+                PacketType.Play.Server.COLLECT,
                 PacketType.Play.Server.ATTACH_ENTITY, PacketType.Play.Server.MOUNT)) {
             @Override
             public void onPacketSending(PacketEvent event) {
@@ -124,8 +120,8 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
                 PacketType packetType = event.getPacketType();
                 PacketIdentity packetIdentity = new PacketIdentity(event.getPacket().getHandle());
                 if (!forwardedHandles.add(packetIdentity)) return;
-                PacketContainer packet = MOVEMENT_PACKETS.contains(packetType)
-                        || RELATIONSHIP_PACKETS.contains(packetType) ? null : event.getPacket().deepClone();
+                PacketContainer packet = RELATIONSHIP_PACKETS.contains(packetType)
+                        ? null : event.getPacket().deepClone();
                 UUID packetViewerId = event.getPlayer().getUniqueId();
                 runOnMain(() -> {
                     try {
@@ -133,9 +129,7 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
                         if (packetViewer == null) return;
                         UUID sourceWorldId = packetViewer.getWorld().getUID();
                         if (!mirroredSources.containsKey(new SourceEntityKey(sourceWorldId, sourceId))) return;
-                        if (MOVEMENT_PACKETS.contains(packetType)) {
-                            relayMovement(sourceWorldId, sourceId);
-                        } else if (RELATIONSHIP_PACKETS.contains(packetType)) {
+                        if (RELATIONSHIP_PACKETS.contains(packetType)) {
                             relayRelationships(sourceWorldId, sourceId);
                         } else if (packetType.equals(PacketType.Play.Server.PROJECTILE_POWER)) {
                             relayProjectilePower(sourceWorldId, sourceId, packet);
@@ -158,6 +152,13 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
             }
         };
         protocol.addPacketListener(eventPipe);
+        this.movementTaskId = plugin.getServer().getScheduler()
+                .scheduleSyncRepeatingTask(plugin, this::tickMovement, 1L, 1L);
+    }
+
+    private void tickMovement() {
+        if (!running || mirrors.isEmpty()) return;
+        for (Mirror mirror : mirrors.values()) mirror.tickMovement();
     }
 
     @Override
@@ -285,6 +286,7 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
 
     @Override
     public void stop() {
+        plugin.getServer().getScheduler().cancelTask(movementTaskId);
         protocol.removePacketListener(eventPipe);
         for (Mirror mirror : mirrors.values()) mirror.destroyAll();
         mirrors.clear();
@@ -327,14 +329,6 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
                 sendNow(target.viewers, List.of(packet));
             }
         });
-    }
-
-    private void relayMovement(UUID sourceWorldId, int sourceId) {
-        for (Mirror mirror : mirrors.values()) {
-            if (!mirror.matchesSource(sourceWorldId, sourceId)) continue;
-            Entity source = Bukkit.getEntity(mirror.sourceUuid);
-            if (source != null) mirror.syncMovement(source);
-        }
     }
 
     private void relayRelationships(UUID sourceWorldId, int sourceId) {
@@ -421,7 +415,6 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
                 .filter(value -> value.serializer() == EntityDataSerializers.OPTIONAL_COMPONENT)
                 .mapToInt(SynchedEntityData.DataValue::id)
                 .min().orElse(-1);
-        if (visibilityId < 0 && customNameId < 0) return values;
         List<SynchedEntityData.DataValue<?>> result = new ArrayList<>(values.size());
         for (SynchedEntityData.DataValue<?> value : values) {
             if (value.id() == visibilityId) {
@@ -430,6 +423,11 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
                 result.add(new SynchedEntityData.DataValue<>(customNameId,
                         EntityDataSerializers.OPTIONAL_COMPONENT,
                         Optional.<net.minecraft.network.chat.Component>empty()));
+            } else if (value.id() == 0 && value.serializer() == EntityDataSerializers.BYTE) {
+                // Sprinting mirrors spawn full-size block-crumb particles under the scaled model
+                // every tick, so the sprint bit of the shared flags is never forwarded.
+                result.add(new SynchedEntityData.DataValue<>(0, EntityDataSerializers.BYTE,
+                        (byte) ((Byte) value.value() & ~0x08)));
             } else {
                 result.add(value);
             }
@@ -535,6 +533,7 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
         private double worldScale;
         private int sourceEntityId;
         private UUID sourceWorldId;
+        private MovementSnapshot lastMovement;
 
         private Mirror(MirrorKey key, Entity source) {
             this.key = key;
@@ -671,7 +670,7 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
             headRotation.getIntegers().write(0, id);
             return new MovementState(sourceLocation.getX(), sourceLocation.getY(), sourceLocation.getZ(), mapping,
                     handle.getDeltaMovement(), handle.getYRot(), handle.getXRot(),
-                    handle.onGround(), headRotation, scale);
+                    handle.onGround(), headRotation, scale, handle instanceof LivingEntity);
         }
 
         private void queueState(Collection<Player> viewers, EntityState state) {
@@ -711,8 +710,26 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
                             state.mapping.y(state.sourceY), state.mapping.z(state.sourceZ)), velocity,
                             state.yaw, state.pitch), Set.<Relative>of(), state.onGround)));
             packets.add(state.headRotation);
-            packets.add(PacketContainer.fromPacket(new ClientboundSetEntityMotionPacket(id, velocity)));
+            // Clients ignore explicit velocity for remote living entities but extrapolate items and
+            // projectiles with it; sending it to living mirrors only fights teleport interpolation.
+            if (!state.living) {
+                packets.add(PacketContainer.fromPacket(new ClientboundSetEntityMotionPacket(id, velocity)));
+            }
             return packets;
+        }
+
+        /** Called every server tick so mirrors track their source at full tick rate even when
+         *  no player receives the source's own movement packets (nobody in its world nearby). */
+        private void tickMovement() {
+            if (jar == null || viewers.isEmpty()) return;
+            Entity source = Bukkit.getEntity(sourceUuid);
+            if (source == null || !source.isValid()) return;
+            net.minecraft.world.entity.Entity handle = ((CraftEntity) source).getHandle();
+            MovementSnapshot current = new MovementSnapshot(handle.getX(), handle.getY(), handle.getZ(),
+                    handle.getYRot(), handle.getXRot(), handle.getYHeadRot(), handle.onGround());
+            if (current.equals(lastMovement)) return;
+            lastMovement = current;
+            syncMovement(source);
         }
 
         private void syncMovement(Entity source) {
@@ -878,7 +895,9 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
                               Vec3 velocity, double headYaw, double worldScale) {}
     private record MovementState(double sourceX, double sourceY, double sourceZ, CoordinateMapping mapping,
                                  Vec3 velocity, float yaw, float pitch, boolean onGround,
-                                 PacketContainer headRotation, double worldScale) {}
+                                 PacketContainer headRotation, double worldScale, boolean living) {}
+    private record MovementSnapshot(double x, double y, double z, float yaw, float pitch,
+                                    float headYaw, boolean onGround) {}
     private record EntityState(List<SynchedEntityData.DataValue<?>> metadata, MovementState movement,
                                Packet<ClientGamePacketListener> attributes,
                                List<Pair<EquipmentSlot, ItemStack>> equipment,

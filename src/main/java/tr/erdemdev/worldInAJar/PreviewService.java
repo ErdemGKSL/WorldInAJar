@@ -50,6 +50,7 @@ public final class PreviewService {
     private EntityPreviewBackend entityBackend;
     private JarRepository repository;
     private int taskId = -1;
+    private int avatarTaskId = -1;
     private int blockRefreshTaskId = -1;
     private int chunkTicketTaskId = -1;
     private long updatePeriodTicks = 1L;
@@ -96,6 +97,20 @@ public final class PreviewService {
         sessionReconcilePending = true;
         taskId = plugin.getServer().getScheduler().scheduleSyncRepeatingTask(
                 plugin, this::tick, 1L, updatePeriodTicks);
+        // Mannequin movement tracks its source every tick; mannequins themselves deduplicate
+        // idle updates, so the slower update-ticks interval only paces visibility and blocks.
+        if (entityBackend == null && updatePeriodTicks > 1L) {
+            avatarTaskId = plugin.getServer().getScheduler().scheduleSyncRepeatingTask(
+                    plugin, this::tickAvatars, 1L, 1L);
+        }
+    }
+
+    private void tickAvatars() {
+        for (JarScene scene : scenes.values()) {
+            if (!scene.jar.placed() || scene.sealed) continue;
+            updateOccupants(scene);
+            updateOutsidePlayers(scene);
+        }
     }
 
     public void stop() {
@@ -105,6 +120,8 @@ public final class PreviewService {
         entityBackend = null;
         if (taskId != -1) plugin.getServer().getScheduler().cancelTask(taskId);
         taskId = -1;
+        if (avatarTaskId != -1) plugin.getServer().getScheduler().cancelTask(avatarTaskId);
+        avatarTaskId = -1;
         if (blockRefreshTaskId != -1) plugin.getServer().getScheduler().cancelTask(blockRefreshTaskId);
         blockRefreshTaskId = -1;
         if (chunkTicketTaskId != -1) plugin.getServer().getScheduler().cancelTask(chunkTicketTaskId);

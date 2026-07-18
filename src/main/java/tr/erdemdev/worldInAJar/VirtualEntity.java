@@ -178,6 +178,10 @@ final class VirtualMannequin extends VirtualEntity {
     private boolean swinging;
     private int swingTime;
     private int hurtTime;
+    private MovementSnapshot lastMovement;
+
+    private record MovementSnapshot(double x, double y, double z, float yaw, float pitch,
+                                    float headYaw, Vec3 velocity, boolean onGround) {}
 
     VirtualMannequin(Player target, Location location, float scale) {
         this(new Mannequin(EntityType.MANNEQUIN,
@@ -210,9 +214,15 @@ final class VirtualMannequin extends VirtualEntity {
 
         location.setYaw(source.yBodyRot);
         location.setPitch(source.getXRot());
-        positionSync(viewers, location, source.getYHeadRot(),
+        // Update calls arrive every tick; idle mannequins must not rebroadcast their position.
+        MovementSnapshot movement = new MovementSnapshot(location.getX(), location.getY(),
+                location.getZ(), location.getYaw(), location.getPitch(), source.getYHeadRot(),
                 source.getDeltaMovement().scale(movementScale), source.onGround());
-        nametag.update(nametagLocation(location), viewers);
+        if (!movement.equals(lastMovement)) {
+            lastMovement = movement;
+            positionSync(viewers, location, movement.headYaw, movement.velocity, movement.onGround);
+            nametag.update(nametagLocation(location), viewers);
+        }
         if (!sharedMetadata.equals(oldSharedMetadata)) {
             sendTo(viewers, new ClientboundSetEntityDataPacket(id(), sharedMetadata));
         }
@@ -271,7 +281,9 @@ final class VirtualMannequin extends VirtualEntity {
 
         mannequin.setSharedFlagOnFire(source.isOnFire());
         mannequin.setShiftKeyDown(source.isShiftKeyDown());
-        mannequin.setSprinting(source.isSprinting());
+        // A sprinting flag makes the client spawn full-size block-crumb particles under the
+        // scaled model every tick, so it is never mirrored.
+        mannequin.setSprinting(false);
         mannequin.setSwimming(source.isSwimming());
         mannequin.setInvisible(source.isInvisible());
         mannequin.setGlowingTag(source.hasGlowingTag());

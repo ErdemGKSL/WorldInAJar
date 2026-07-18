@@ -3,6 +3,9 @@
 entity-preview: manequeen
 
 # Interior edge length in blocks. Existing jars retain the scale they were created with.
+# Note: previewed players/entities are resized with Minecraft's scale attribute, which the
+# game clamps to 1/16..16 on every client. With scale above 16, blocks still scale fully
+# but previewed entities cap at 16x (and miniatures at 1/16th).
 jar:
   scale: 32
   # Maximum exterior width, height, or depth, in glass blocks, for attached jar assemblies.
@@ -24,7 +27,8 @@ interior:
   combination-max-millis-per-tick: 2.0
 
 preview:
-  # Viewer visibility and moving player markers are updated on this interval.
+  # Viewer visibility and full entity-state reconciliation run on this interval.
+  # Movement of previewed entities and player markers is synced every server tick.
   update-ticks: 5
   # Delay for event-driven block preview updates. 1 refreshes on the next server tick.
   # Nearby changes are coalesced into one refresh to keep rapid building responsive.
