@@ -10,6 +10,7 @@ public final class WorldInAJar extends JavaPlugin {
     private InteriorService interiors;
     private PreviewService previews;
     private PortalTransferService transfers;
+    private SpectatorService spectators;
 
     @Override public void onEnable() {
         saveDefaultConfig();
@@ -18,6 +19,7 @@ public final class WorldInAJar extends JavaPlugin {
         interiors = new InteriorService(this); interiors.loadWorld();
         previews = new PreviewService(this, interiors);
         transfers = new PortalTransferService(this, repository, items, interiors);
+        spectators = new SpectatorService(this, repository, items, interiors);
         // Recipe registrations survive some plugin managers' hot reload cycle. Remove the
         // old key first so enabling is idempotent instead of disabling the whole plugin.
         getServer().removeRecipe(recipeKey());
@@ -26,17 +28,19 @@ public final class WorldInAJar extends JavaPlugin {
         getServer().addRecipe(items.recipe(this));
         getServer().addRecipe(items.portalSideRecipe());
         getServer().getPluginManager().registerEvents(
-                new JarListener(this, repository, items, interiors, previews, transfers), this);
+                new JarListener(this, repository, items, interiors, previews, transfers, spectators), this);
         JarCommand executor = new JarCommand(this);
         PluginCommand command = getCommand("jar");
         if (command == null) throw new IllegalStateException("jar command missing from plugin.yml");
         command.setExecutor(executor); command.setTabCompleter(executor);
         previews.start(repository);
         transfers.start();
+        spectators.start();
         getLogger().info("Loaded " + repository.all().size() + " persistent world jar(s).");
     }
 
     @Override public void onDisable() {
+        if (spectators != null) spectators.stop();
         if (transfers != null) transfers.stop();
         if (previews != null) previews.stop();
         if (interiors != null) interiors.stop();
@@ -65,4 +69,5 @@ public final class WorldInAJar extends JavaPlugin {
     JarRepository repository() { return repository; }
     JarItems items() { return items; }
     InteriorService interiors() { return interiors; }
+    SpectatorService spectators() { return spectators; }
 }

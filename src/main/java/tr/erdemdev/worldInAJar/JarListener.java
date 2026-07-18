@@ -43,12 +43,15 @@ public final class JarListener implements Listener {
     private final InteriorService interiors;
     private final PreviewService previews;
     private final PortalTransferService transfers;
+    private final SpectatorService spectators;
     private final Set<UUID> combinationsInProgress = new java.util.HashSet<>();
 
     public JarListener(WorldInAJar plugin, JarRepository repository, JarItems items,
-                       InteriorService interiors, PreviewService previews, PortalTransferService transfers) {
+                       InteriorService interiors, PreviewService previews, PortalTransferService transfers,
+                       SpectatorService spectators) {
         this.plugin = plugin; this.repository = repository; this.items = items;
         this.interiors = interiors; this.previews = previews; this.transfers = transfers;
+        this.spectators = spectators;
     }
 
     @EventHandler(priority = EventPriority.HIGHEST)
@@ -126,6 +129,7 @@ public final class JarListener implements Listener {
         interiors.ensureBuiltAsync(placedJar, () -> {
             previews.invalidate(placedJar);
             previews.refresh(placedJar);
+            spectators.placed(placedJar);
         });
         event.getPlayer().sendMessage("§aJar placed. Right-click the side facing you to enter.");
     }
@@ -236,6 +240,15 @@ public final class JarListener implements Listener {
         }
         if (interiors.isExitWall(event.getPlayer(), block.getLocation(), repository)) {
             event.setCancelled(true);
+            JarRecord inside = interiors.syncSession(event.getPlayer(), event.getPlayer().getLocation(), repository);
+            if (inside != null && !inside.placed()) {
+                SpectatorService.StartResult result = spectators.tryStart(event.getPlayer(), inside);
+                if (result == SpectatorService.StartResult.STARTED) return;
+                if (result == SpectatorService.StartResult.UNAVAILABLE) {
+                    event.getPlayer().sendMessage("§cSpectator mode is not available right now.");
+                    return;
+                }
+            }
             if (interiors.exit(event.getPlayer(), repository) == InteriorService.ExitResult.CLOGGED)
                 event.getPlayer().sendMessage("§cThe jar door is clogged. You cannot leave.");
         }
@@ -243,12 +256,17 @@ public final class JarListener implements Listener {
 
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
+        spectators.onQuit(event.getPlayer());
         interiors.forget(event.getPlayer());
         previews.forget(event.getPlayer());
     }
 
     @EventHandler
     public void onJoin(PlayerJoinEvent event) {
+        if (spectators.hasRecovery(event.getPlayer())) {
+            spectators.onJoin(event.getPlayer());
+            return;
+        }
         interiors.syncSession(event.getPlayer(), event.getPlayer().getLocation(), repository);
     }
 
@@ -374,8 +392,10 @@ public final class JarListener implements Listener {
     }
 
     private void deleteJar(UUID id) {
-        JarRecord jar = repository.remove(id).orElse(null);
+        JarRecord jar = repository.byId(id).orElse(null);
         if (jar == null) return;
+        spectators.deleted(jar);
+        repository.remove(id);
         previews.remove(id);
         interiors.destroy(jar);
         plugin.getLogger().info("Deleted jar world " + id + ".");
@@ -530,19 +550,24 @@ public final class JarListener implements Listener {
         copies.add(new InteriorService.InteriorCopy(target,
                 target.x() - global.minX(), target.y() - global.minY(),
                 target.z() - global.minZ(), null));
+        int sourceOffsetX = sourceOriginX - global.minX();
+        int sourceOffsetY = sourceOriginY - global.minY();
+        int sourceOffsetZ = sourceOriginZ - global.minZ();
         if (source != null) copies.add(new InteriorService.InteriorCopy(source,
-                sourceOriginX - global.minX(), sourceOriginY - global.minY(),
-                sourceOriginZ - global.minZ(), null));
+                sourceOffsetX, sourceOffsetY, sourceOffsetZ, null));
         for (JarAssembly.Cell cell : sourceAssembly.cells()) {
             clicked.getWorld().getBlockAt(sourceOriginX + cell.x(), sourceOriginY + cell.y(),
                             sourceOriginZ + cell.z()).setType(Material.GLASS, false);
         }
+        if (source != null) spectators.prepareAttachment(source, combinedRecord,
+                sourceOffsetX, sourceOffsetY, sourceOffsetZ);
         player.getInventory().setItemInMainHand(null);
         previews.remove(target.id());
         boolean returnPortalSide = source != null && source.hasPortal() && !sourcePortalAdopted;
         interiors.copyRegionsAsync(combinedRecord, copies, () -> {
             interiors.destroyCell(target);
             if (source != null) {
+                spectators.placed(combinedRecord);
                 repository.remove(source.id());
                 previews.remove(source.id());
                 interiors.destroy(source);

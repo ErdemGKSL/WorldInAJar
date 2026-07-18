@@ -51,6 +51,10 @@ public final class JarCommand implements CommandExecutor, TabCompleter {
             case "exit" -> {
                 if (!(sender instanceof Player player)) return error(sender, "Players only.");
                 if (!sender.hasPermission("worldinajar.exit")) return denied(sender);
+                if (plugin.spectators().hasRecovery(player)) {
+                    plugin.spectators().restore(player);
+                    return true;
+                }
                 InteriorService.ExitResult result = plugin.interiors().exit(player, plugin.repository());
                 if (result == InteriorService.ExitResult.NOT_INSIDE) return error(sender, "You are not inside a jar.");
                 if (result == InteriorService.ExitResult.CLOGGED) return error(sender, "The jar door is clogged. You cannot leave.");

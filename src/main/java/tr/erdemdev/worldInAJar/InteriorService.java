@@ -212,7 +212,26 @@ public final class InteriorService {
         if (!jar.hasPortal()) return;
         if (!ensureBuilt(jar)) return;
         sessions.put(player.getUniqueId(), jar.id());
+        if (player.teleport(entryLocation(jar, player))) {
+            applyEnvironment(player, jar);
+        } else {
+            sessions.remove(player.getUniqueId());
+        }
+    }
+
+    public Location entryLocation(JarRecord jar, Player player) {
         CellLayout.Cell c = cell(jar);
+        if (!jar.hasPortal()) {
+            JarAssembly.Cell first = jar.assembly().cells().stream()
+                    .min(java.util.Comparator.comparingInt(JarAssembly.Cell::y)
+                            .thenComparingInt(JarAssembly.Cell::z)
+                            .thenComparingInt(JarAssembly.Cell::x)).orElseThrow();
+            return new Location(world,
+                    c.minX() + first.x() * jar.scale() + jar.scale() / 2.0,
+                    c.minY() + first.y() * jar.scale() + 1.1,
+                    c.minZ() + first.z() * jar.scale() + jar.scale() / 2.0,
+                    player.getYaw(), player.getPitch());
+        }
         Location doorBlock = jar.doorBlockLocation();
         int tileX = doorBlock.getBlockX() - jar.x(), tileZ = doorBlock.getBlockZ() - jar.z();
         double x = c.minX() + tileX * jar.scale() + jar.scale() / 2.0;
@@ -223,11 +242,7 @@ public final class InteriorService {
         else if (jar.door() == BlockFace.SOUTH) z = c.minZ() + (tileZ + 1) * jar.scale() - margin - .5;
         else if (jar.door() == BlockFace.WEST) x = c.minX() + tileX * jar.scale() + margin + .5;
         else if (jar.door() == BlockFace.EAST) x = c.minX() + (tileX + 1) * jar.scale() - margin - .5;
-        if (player.teleport(new Location(world, x, y, z, player.getYaw(), player.getPitch()))) {
-            applyEnvironment(player, jar);
-        } else {
-            sessions.remove(player.getUniqueId());
-        }
+        return new Location(world, x, y, z, player.getYaw(), player.getPitch());
     }
 
     public ExitResult exit(Player player, JarRepository repository) {
