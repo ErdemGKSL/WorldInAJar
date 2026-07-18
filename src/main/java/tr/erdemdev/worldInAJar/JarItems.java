@@ -9,6 +9,9 @@ import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
 
@@ -41,6 +44,10 @@ public final class JarItems {
     }
 
     public ItemStack create(UUID id, JarAssembly assembly, int scale) {
+        return create(id, assembly, scale, List.of());
+    }
+
+    public ItemStack create(UUID id, JarAssembly assembly, int scale, Collection<String> occupantNames) {
         assembly = assembly.normalized();
         JarAssembly storedAssembly = assembly;
         ItemStack item = new ItemStack(Material.GLASS);
@@ -49,9 +56,7 @@ public final class JarItems {
                     + "x" + storedAssembly.depth();
             meta.displayName(Component.text(storedAssembly.cells().size() == 1
                     ? "World in a Jar" : "Combined World Jar (" + dimensions + ")"));
-            meta.lore(List.of(
-                    Component.text(id == null ? "Place to create a miniature world" : "Contains a persistent miniature world"),
-                    Component.text("Footprint: " + dimensions + ", parts: " + storedAssembly.parts().size())));
+            meta.lore(lore(id, storedAssembly, occupantNames));
             meta.setMaxStackSize(1);
             meta.getPersistentDataContainer().set(itemKey, PersistentDataType.BYTE, (byte) 1);
             meta.getPersistentDataContainer().set(widthKey, PersistentDataType.INTEGER, storedAssembly.width());
@@ -69,6 +74,39 @@ public final class JarItems {
             if (id != null) meta.getPersistentDataContainer().set(idKey, PersistentDataType.STRING, id.toString());
         });
         return item;
+    }
+
+    public boolean updateOccupants(ItemStack item, Collection<String> occupantNames) {
+        UUID id = id(item);
+        JarAssembly assembly = assembly(item);
+        if (id == null || assembly == null) return false;
+        List<Component> updated = lore(id, assembly, occupantNames);
+        ItemMeta meta = item.getItemMeta();
+        if (meta != null && updated.equals(meta.lore())) return false;
+        item.editMeta(edited -> edited.lore(updated));
+        return true;
+    }
+
+    static List<Component> lore(UUID id, JarAssembly assembly, Collection<String> occupantNames) {
+        String dimensions = assembly.width() + "x" + assembly.height() + "x" + assembly.depth();
+        List<Component> lore = new ArrayList<>();
+        lore.add(Component.text(id == null
+                ? "Place to create a miniature world" : "Contains a persistent miniature world"));
+        lore.add(Component.text("Footprint: " + dimensions + ", parts: " + assembly.parts().size()));
+        if (id == null) return List.copyOf(lore);
+
+        List<String> visibleNames = occupantNames.stream()
+                .filter(name -> name != null && !name.isBlank())
+                .distinct()
+                .sorted(String.CASE_INSENSITIVE_ORDER.thenComparing(Comparator.naturalOrder()))
+                .toList();
+        if (visibleNames.isEmpty()) {
+            lore.add(Component.text("Players inside: None"));
+        } else {
+            lore.add(Component.text("Players inside (" + visibleNames.size() + "):"));
+            visibleNames.forEach(name -> lore.add(Component.text("- " + name)));
+        }
+        return List.copyOf(lore);
     }
 
     public boolean isJar(ItemStack item) {

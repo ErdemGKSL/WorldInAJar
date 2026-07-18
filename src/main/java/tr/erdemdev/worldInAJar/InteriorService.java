@@ -275,6 +275,10 @@ public final class InteriorService {
         return result;
     }
 
+    public UUID sessionId(Player player) {
+        return sessions.get(player.getUniqueId());
+    }
+
     public void forget(Player player) {
         if (sessions.remove(player.getUniqueId()) != null) resetEnvironment(player);
     }

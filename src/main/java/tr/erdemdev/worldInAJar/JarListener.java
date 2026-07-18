@@ -16,11 +16,14 @@ import org.bukkit.event.block.*;
 import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.entity.EntityRemoveEvent;
 import org.bukkit.event.entity.ItemMergeEvent;
+import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.ClickType;
+import org.bukkit.event.inventory.InventoryOpenEvent;
 import org.bukkit.event.inventory.PrepareItemCraftEvent;
 import org.bukkit.event.inventory.CraftItemEvent;
 import org.bukkit.event.player.PlayerChangedWorldEvent;
+import org.bukkit.event.player.PlayerGameModeChangeEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
@@ -37,13 +40,16 @@ import org.bukkit.inventory.ItemStack;
 
 import java.util.UUID;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 
 public final class JarListener implements Listener {
     private final WorldInAJar plugin;
     private final JarRepository repository;
     private final JarItems items;
+    private final JarItemLoreService itemLore;
     private final InteriorService interiors;
     private final PreviewService previews;
     private final PortalTransferService transfers;
@@ -51,9 +57,11 @@ public final class JarListener implements Listener {
     private final Set<UUID> combinationsInProgress = new java.util.HashSet<>();
 
     public JarListener(WorldInAJar plugin, JarRepository repository, JarItems items,
+                       JarItemLoreService itemLore,
                        InteriorService interiors, PreviewService previews, PortalTransferService transfers,
                        SpectatorService spectators) {
         this.plugin = plugin; this.repository = repository; this.items = items;
+        this.itemLore = itemLore;
         this.interiors = interiors; this.previews = previews; this.transfers = transfers;
         this.spectators = spectators;
     }
@@ -175,7 +183,8 @@ public final class JarListener implements Listener {
             previews.seal(carried);
             placeFootprint(current, Material.AIR);
             event.getBlock().getWorld().dropItemNaturally(event.getBlock().getLocation(),
-                    items.create(current.id(), current.assembly(), current.scale()));
+                    items.create(current.id(), current.assembly(), current.scale(),
+                            itemLore.playerNames(current)));
         });
     }
 
@@ -260,18 +269,22 @@ public final class JarListener implements Listener {
 
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
+        UUID previous = interiors.sessionId(event.getPlayer());
         spectators.onQuit(event.getPlayer());
         interiors.forget(event.getPlayer());
         previews.forget(event.getPlayer());
+        itemLore.refresh(previous);
     }
 
     @EventHandler
     public void onJoin(PlayerJoinEvent event) {
+        itemLore.refreshPlayer(event.getPlayer());
         if (spectators.hasRecovery(event.getPlayer())) {
             spectators.onJoin(event.getPlayer());
             return;
         }
-        interiors.syncSession(event.getPlayer(), event.getPlayer().getLocation(), repository);
+        JarRecord inside = interiors.syncSession(event.getPlayer(), event.getPlayer().getLocation(), repository);
+        if (inside != null) itemLore.refresh(inside.id());
     }
 
     @EventHandler(priority = EventPriority.HIGHEST)
@@ -295,13 +308,21 @@ public final class JarListener implements Listener {
                 && from.getBlockX() == to.getBlockX()
                 && from.getBlockY() == to.getBlockY()
                 && from.getBlockZ() == to.getBlockZ()) return;
-        interiors.syncSession(event.getPlayer(), to, repository);
+        UUID previous = interiors.sessionId(event.getPlayer());
+        JarRecord current = interiors.syncSession(event.getPlayer(), to, repository);
+        UUID currentId = current == null ? null : current.id();
+        if (!Objects.equals(previous, currentId)) {
+            Set<UUID> affected = new HashSet<>();
+            if (previous != null) affected.add(previous);
+            if (currentId != null) affected.add(currentId);
+            itemLore.refresh(affected);
+        }
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
     public void onRespawn(PlayerRespawnEvent event) {
         previews.preparePlayerTransition(event.getPlayer());
-        interiors.syncSession(event.getPlayer(), event.getRespawnLocation(), repository);
+        refreshAfterTransition(event.getPlayer(), event.getPlayer().getLocation(), event.getRespawnLocation());
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
@@ -309,11 +330,29 @@ public final class JarListener implements Listener {
         if (event.getFrom().getWorld() != event.getTo().getWorld()) {
             previews.preparePlayerTransition(event.getPlayer());
         }
+        refreshAfterTransition(event.getPlayer(), event.getFrom(), event.getTo());
     }
 
     @EventHandler
     public void onWorldChange(PlayerChangedWorldEvent event) {
         interiors.syncSession(event.getPlayer(), event.getPlayer().getLocation(), repository);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onGameModeChange(PlayerGameModeChangeEvent event) {
+        UUID jarId = interiors.sessionId(event.getPlayer());
+        plugin.getServer().getScheduler().runTask(plugin, () -> itemLore.refresh(jarId));
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onDeath(PlayerDeathEvent event) {
+        UUID jarId = interiors.sessionId(event.getPlayer());
+        plugin.getServer().getScheduler().runTask(plugin, () -> itemLore.refresh(jarId));
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onInventoryOpen(InventoryOpenEvent event) {
+        itemLore.refreshInventory(event.getInventory());
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -378,8 +417,39 @@ public final class JarListener implements Listener {
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onInventorySlotChange(PlayerInventorySlotChangeEvent event) {
         UUID previous = items.id(event.getOldItemStack());
-        if (previous == null || previous.equals(items.id(event.getNewItemStack()))) return;
+        UUID current = items.id(event.getNewItemStack());
+        if (current != null) {
+            plugin.getServer().getScheduler().runTask(plugin, () -> itemLore.refresh(current));
+        }
+        if (previous == null || previous.equals(current)) return;
         checkDeletedNextTick(previous);
+    }
+
+    private void refreshAfterTransition(Player player, Location from, Location to) {
+        Set<UUID> affected = new HashSet<>();
+        JarRecord fromJar = jarAt(from);
+        JarRecord toJar = jarAt(to);
+        if (fromJar != null) affected.add(fromJar.id());
+        if (toJar != null) affected.add(toJar.id());
+        UUID sessionId = interiors.sessionId(player);
+        if (sessionId != null) affected.add(sessionId);
+        plugin.getServer().getScheduler().runTask(plugin, () -> {
+            if (!player.isOnline()) {
+                itemLore.refresh(affected);
+                return;
+            }
+            JarRecord current = interiors.syncSession(player, player.getLocation(), repository);
+            if (current != null) affected.add(current.id());
+            itemLore.refresh(affected);
+        });
+    }
+
+    private JarRecord jarAt(Location location) {
+        if (location.getWorld() != interiors.world()) return null;
+        for (JarRecord jar : repository.all()) {
+            if (interiors.contains(jar, location)) return jar;
+        }
+        return null;
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)

@@ -8,6 +8,7 @@ public final class WorldInAJar extends JavaPlugin {
     private JarRepository repository;
     private JarItems items;
     private InteriorService interiors;
+    private JarItemLoreService itemLore;
     private PreviewService previews;
     private PortalTransferService transfers;
     private SpectatorService spectators;
@@ -17,6 +18,7 @@ public final class WorldInAJar extends JavaPlugin {
         repository = new JarRepository(this); repository.load();
         items = new JarItems(this);
         interiors = new InteriorService(this); interiors.loadWorld();
+        itemLore = new JarItemLoreService(this, repository, items, interiors);
         previews = new PreviewService(this, interiors);
         transfers = new PortalTransferService(this, repository, items, interiors);
         spectators = new SpectatorService(this, repository, items, interiors, previews);
@@ -28,7 +30,7 @@ public final class WorldInAJar extends JavaPlugin {
         getServer().addRecipe(items.recipe(this));
         getServer().addRecipe(items.portalSideRecipe());
         getServer().getPluginManager().registerEvents(
-                new JarListener(this, repository, items, interiors, previews, transfers, spectators), this);
+                new JarListener(this, repository, items, itemLore, interiors, previews, transfers, spectators), this);
         JarCommand executor = new JarCommand(this);
         PluginCommand command = getCommand("jar");
         if (command == null) throw new IllegalStateException("jar command missing from plugin.yml");
