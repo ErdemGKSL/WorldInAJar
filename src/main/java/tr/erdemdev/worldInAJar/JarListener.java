@@ -390,10 +390,14 @@ public final class JarListener implements Listener {
                 player.sendMessage("§cYou do not have permission to spectate jars.");
                 return;
             }
-            SpectatorService.StartResult result = spectators.inspect(player, jar);
-            if (result != SpectatorService.StartResult.STARTED) {
-                player.sendMessage("§cThat miniature world is not ready to spectate.");
-            }
+            plugin.getServer().getScheduler().runTask(plugin, () -> {
+                if (!player.isOnline()) return;
+                JarRecord current = repository.byId(id).orElse(null);
+                SpectatorService.StartResult result = spectators.inspect(player, current);
+                if (result != SpectatorService.StartResult.STARTED) {
+                    player.sendMessage("§cThat miniature world is not ready to spectate.");
+                }
+            });
             return;
         }
         if (!transfers.insertFromCursor(event.getCursor(), jar)) return;

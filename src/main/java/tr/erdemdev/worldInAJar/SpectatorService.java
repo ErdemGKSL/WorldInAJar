@@ -32,7 +32,9 @@ public final class SpectatorService {
     private final File file;
     private final Map<UUID, SpectatorRecovery> recoveries = new HashMap<>();
     private final Set<UUID> active = new HashSet<>();
+    private final Map<UUID, Long> validationAfter = new HashMap<>();
     private BukkitTask task;
+    private long tick;
 
     public SpectatorService(WorldInAJar plugin, JarRepository repository, JarItems items,
                             InteriorService interiors, PreviewService previews) {
@@ -55,6 +57,7 @@ public final class SpectatorService {
         task = null;
         save();
         active.clear();
+        validationAfter.clear();
     }
 
     public StartResult tryStart(Player player, JarRecord jar) {
@@ -117,10 +120,13 @@ public final class SpectatorService {
             return StartResult.UNAVAILABLE;
         }
 
-        active.add(player.getUniqueId());
+        UUID playerId = player.getUniqueId();
+        active.add(playerId);
+        validationAfter.put(playerId, tick + 3);
         previews.sleepOutside(player, body);
         player.setGameMode(GameMode.SPECTATOR);
-        if (!player.teleport(interiors.entryLocation(jar, player))) {
+        Location entry = interiors.entryLocation(jar, player);
+        if (!interiors.contains(jar, entry) || !player.teleport(entry)) {
             restore(player);
             return StartResult.UNAVAILABLE;
         }
@@ -160,6 +166,7 @@ public final class SpectatorService {
     public void onQuit(Player player) {
         UUID playerId = player.getUniqueId();
         active.remove(playerId);
+        validationAfter.remove(playerId);
         for (UUID spectatorId : new ArrayList<>(active)) {
             SpectatorRecovery recovery = recoveries.get(spectatorId);
             if (recovery == null || !playerId.equals(recovery.carrierId())) continue;
@@ -219,6 +226,7 @@ public final class SpectatorService {
     }
 
     private void tick() {
+        tick++;
         for (Map.Entry<UUID, SpectatorRecovery> entry : new ArrayList<>(recoveries.entrySet())) {
             Player player = Bukkit.getPlayer(entry.getKey());
             if (player == null || !player.isOnline()) continue;
@@ -230,6 +238,11 @@ public final class SpectatorService {
             JarRecord jar = recovery.jarId() == null ? null : repository.byId(recovery.jarId()).orElse(null);
             if (jar == null || jar.placed()) {
                 restore(player, recovery);
+                continue;
+            }
+            if (recovery.kind() == SpectatorRecovery.Kind.INSPECT_JAR
+                    && tick < validationAfter.getOrDefault(entry.getKey(), 0L)) {
+                if (player.getGameMode() != GameMode.SPECTATOR) player.setGameMode(GameMode.SPECTATOR);
                 continue;
             }
             Player carrier = Bukkit.getPlayer(recovery.carrierId());
@@ -274,6 +287,7 @@ public final class SpectatorService {
         player.setGameMode(recovery.gameMode());
         previews.wake(player.getUniqueId());
         active.remove(player.getUniqueId());
+        validationAfter.remove(player.getUniqueId());
         recoveries.remove(player.getUniqueId());
         save();
         interiors.syncSession(player, player.getLocation(), repository);
