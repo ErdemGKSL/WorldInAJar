@@ -17,6 +17,7 @@ import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.entity.EntityRemoveEvent;
 import org.bukkit.event.entity.ItemMergeEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.ClickType;
 import org.bukkit.event.inventory.PrepareItemCraftEvent;
 import org.bukkit.event.inventory.CraftItemEvent;
 import org.bukkit.event.player.PlayerChangedWorldEvent;
@@ -275,7 +276,7 @@ public final class JarListener implements Listener {
 
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onToggleSneak(PlayerToggleSneakEvent event) {
-        if (!event.isSneaking() || !spectators.hasRecovery(event.getPlayer())) return;
+        if (!event.isSneaking() || !spectators.shiftReturns(event.getPlayer())) return;
         event.setCancelled(true);
         spectators.restore(event.getPlayer());
     }
@@ -343,6 +344,19 @@ public final class JarListener implements Listener {
         UUID id = items.id(event.getCurrentItem());
         if (id == null) return;
         JarRecord jar = repository.byId(id).orElse(null);
+        if (event.getClick() == ClickType.SHIFT_RIGHT && event.getWhoClicked() instanceof Player player
+                && event.getClickedInventory() == player.getInventory()) {
+            event.setCancelled(true);
+            if (!player.hasPermission("worldinajar.enter")) {
+                player.sendMessage("§cYou do not have permission to spectate jars.");
+                return;
+            }
+            SpectatorService.StartResult result = spectators.inspect(player, jar);
+            if (result != SpectatorService.StartResult.STARTED) {
+                player.sendMessage("§cThat miniature world is not ready to spectate.");
+            }
+            return;
+        }
         if (!transfers.insertFromCursor(event.getCursor(), jar)) return;
         event.setCancelled(true);
         event.getView().setCursor(null);

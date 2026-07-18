@@ -68,7 +68,8 @@ public final class SpectatorService {
         Location fallback = fallback(jar);
         SpectatorRecovery recovery;
         try {
-            recovery = new SpectatorRecovery(jar.id(), carrier.getUniqueId(), player.getGameMode(),
+            recovery = new SpectatorRecovery(SpectatorRecovery.Kind.FOLLOW_CARRIER,
+                    jar.id(), carrier.getUniqueId(), player.getGameMode(),
                     location.getX() - cell.minX(), location.getY() - cell.minY(),
                     location.getZ() - cell.minZ(), location.getYaw(), location.getPitch(),
                     fallback.getWorld().getName(), fallback.getX(), fallback.getY(), fallback.getZ());
@@ -83,7 +84,7 @@ public final class SpectatorService {
         }
 
         active.add(player.getUniqueId());
-        previews.sleep(player, jar, location);
+        previews.sleepInside(player, jar, location);
         player.setGameMode(GameMode.SPECTATOR);
         if (!player.teleport(carrier.getLocation()) || !target(player, carrier)) {
             restore(player);
@@ -93,8 +94,48 @@ public final class SpectatorService {
         return StartResult.STARTED;
     }
 
+    public StartResult inspect(Player player, JarRecord jar) {
+        if (jar == null || jar.placed() || player.getGameMode() == GameMode.SPECTATOR
+                || recoveries.containsKey(player.getUniqueId())) return StartResult.UNAVAILABLE;
+        if (!contains(player, jar.id())) return StartResult.NO_CARRIER;
+        if (!interiors.ensureBuilt(jar)) return StartResult.UNAVAILABLE;
+
+        Location body = player.getLocation();
+        SpectatorRecovery recovery;
+        try {
+            recovery = new SpectatorRecovery(SpectatorRecovery.Kind.INSPECT_JAR,
+                    jar.id(), player.getUniqueId(), player.getGameMode(), 0, 0, 0,
+                    body.getYaw(), body.getPitch(), body.getWorld().getName(),
+                    body.getX(), body.getY(), body.getZ());
+        } catch (IllegalArgumentException exception) {
+            return StartResult.UNAVAILABLE;
+        }
+        recoveries.put(player.getUniqueId(), recovery);
+        if (!save()) {
+            recoveries.remove(player.getUniqueId());
+            player.sendMessage("§cYour spectator return point could not be saved.");
+            return StartResult.UNAVAILABLE;
+        }
+
+        active.add(player.getUniqueId());
+        previews.sleepOutside(player, body);
+        player.setGameMode(GameMode.SPECTATOR);
+        if (!player.teleport(interiors.entryLocation(jar, player))) {
+            restore(player);
+            return StartResult.UNAVAILABLE;
+        }
+        player.setSpectatorTarget(null);
+        player.sendMessage("§aYou are spectating the miniature world. Fly outside its boundary to return.");
+        return StartResult.STARTED;
+    }
+
     public boolean hasRecovery(Player player) {
         return recoveries.containsKey(player.getUniqueId());
+    }
+
+    public boolean shiftReturns(Player player) {
+        SpectatorRecovery recovery = recoveries.get(player.getUniqueId());
+        return recovery != null && recovery.kind() == SpectatorRecovery.Kind.FOLLOW_CARRIER;
     }
 
     public boolean allowsTarget(Player player, Entity target) {
@@ -154,10 +195,12 @@ public final class SpectatorService {
                     source.scale(), fallback.getWorld().getName(), fallback.getX(),
                     fallback.getY(), fallback.getZ());
             recoveries.put(playerId, remapped);
-            CellLayout.Cell cell = interiors.cell(target);
-            previews.moveSleeper(playerId, source, target, new Location(interiors.world(),
-                    cell.minX() + remapped.relativeX(), cell.minY() + remapped.relativeY(),
-                    cell.minZ() + remapped.relativeZ(), remapped.yaw(), 90f));
+            if (recovery.kind() == SpectatorRecovery.Kind.FOLLOW_CARRIER) {
+                CellLayout.Cell cell = interiors.cell(target);
+                previews.moveSleeper(playerId, source, target, new Location(interiors.world(),
+                        cell.minX() + remapped.relativeX(), cell.minY() + remapped.relativeY(),
+                        cell.minZ() + remapped.relativeZ(), remapped.yaw(), 90f));
+            }
         });
         save();
     }
@@ -195,14 +238,18 @@ public final class SpectatorService {
                 continue;
             }
             if (player.getGameMode() != GameMode.SPECTATOR) player.setGameMode(GameMode.SPECTATOR);
-            if (player.getSpectatorTarget() != carrier) target(player, carrier);
+            if (recovery.kind() == SpectatorRecovery.Kind.FOLLOW_CARRIER) {
+                if (player.getSpectatorTarget() != carrier) target(player, carrier);
+            } else if (!interiors.contains(jar, player.getLocation())) {
+                restore(player, recovery);
+            }
         }
     }
 
     private boolean restore(Player player, SpectatorRecovery recovery) {
         Location destination;
         JarRecord jar = recovery.jarId() == null ? null : repository.byId(recovery.jarId()).orElse(null);
-        if (jar != null) {
+        if (jar != null && recovery.kind() == SpectatorRecovery.Kind.FOLLOW_CARRIER) {
             if (!interiors.ensureBuilt(jar)) return false;
             CellLayout.Cell cell = interiors.cell(jar);
             destination = new Location(interiors.world(), cell.minX() + recovery.relativeX(),
@@ -230,9 +277,11 @@ public final class SpectatorService {
         recoveries.remove(player.getUniqueId());
         save();
         interiors.syncSession(player, player.getLocation(), repository);
-        player.sendMessage(jar == null
+        player.sendMessage(jar == null && recovery.kind() == SpectatorRecovery.Kind.FOLLOW_CARRIER
                 ? "§cThat jar no longer exists. You were moved to a safe location."
-                : "§aYou returned inside the jar.");
+                : recovery.kind() == SpectatorRecovery.Kind.FOLLOW_CARRIER
+                ? "§aYou returned inside the jar."
+                : "§aYou returned to your body.");
         return true;
     }
 
@@ -286,6 +335,7 @@ public final class SpectatorService {
                 String jarValue = yaml.getString(path + "jar");
                 String carrierValue = yaml.getString(path + "carrier");
                 SpectatorRecovery recovery = new SpectatorRecovery(
+                        SpectatorRecovery.Kind.valueOf(yaml.getString(path + "kind", "FOLLOW_CARRIER")),
                         jarValue == null ? null : UUID.fromString(jarValue),
                         carrierValue == null ? null : UUID.fromString(carrierValue),
                         GameMode.valueOf(yaml.getString(path + "game-mode", "SURVIVAL")),
@@ -308,6 +358,7 @@ public final class SpectatorService {
         for (Map.Entry<UUID, SpectatorRecovery> entry : recoveries.entrySet()) {
             String path = "players." + entry.getKey() + ".";
             SpectatorRecovery recovery = entry.getValue();
+            yaml.set(path + "kind", recovery.kind().name());
             yaml.set(path + "jar", recovery.jarId() == null ? null : recovery.jarId().toString());
             yaml.set(path + "carrier", recovery.carrierId() == null ? null : recovery.carrierId().toString());
             yaml.set(path + "game-mode", recovery.gameMode().name());

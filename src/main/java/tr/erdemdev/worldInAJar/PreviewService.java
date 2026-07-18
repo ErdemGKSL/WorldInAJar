@@ -34,6 +34,7 @@ public final class PreviewService {
     private final InteriorService interiors;
     private final NamespacedKey displayKey;
     private final Map<UUID, JarScene> scenes = new HashMap<>();
+    private final Map<UUID, OutsideSleeper> outsideSleepers = new HashMap<>();
     private final Map<OutsideArea, List<OutsideOffset>> outsideOffsets = new HashMap<>();
     private final Set<PreviewChunk> activeChunkTickets = new HashSet<>();
     private final Map<PreviewChunk, Long> pendingChunkTickets = new ConcurrentHashMap<>();
@@ -137,6 +138,10 @@ public final class PreviewService {
         releaseChunkTickets();
         for (JarScene scene : scenes.values()) scene.removeAll();
         scenes.clear();
+        for (OutsideSleeper sleeper : outsideSleepers.values()) {
+            for (Player viewer : online(sleeper.viewers)) sleeper.body.destroy(viewer);
+        }
+        outsideSleepers.clear();
         updatePeriodTicks = 1L;
         blockRefreshElapsedTicks = 0L;
         sessionReconcilePending = true;
@@ -209,9 +214,11 @@ public final class PreviewService {
             scene.removeAvatar(id, scene.occupants);
             scene.removeAvatar(id, scene.outsiders);
         }
+        for (OutsideSleeper sleeper : outsideSleepers.values()) sleeper.viewers.remove(id);
     }
 
-    public void sleep(Player player, JarRecord jar, Location location) {
+    public void sleepInside(Player player, JarRecord jar, Location location) {
+        wake(player.getUniqueId());
         JarScene scene = scenes.computeIfAbsent(jar.id(), ignored -> new JarScene(jar));
         if (!scene.jar.equals(jar)) scene = replaceScene(scene, jar);
         scene.removeAvatar(player.getUniqueId(), scene.sleepers);
@@ -223,6 +230,17 @@ public final class PreviewService {
         showTo(scene.interiorViewers, List.of(body));
     }
 
+    public void sleepOutside(Player player, Location location) {
+        wake(player.getUniqueId());
+        Location sleeping = location.clone();
+        sleeping.setPitch(90f);
+        VirtualMannequin body = new VirtualMannequin(player, sleeping, 1f);
+        body.sleep(sleeping, List.of());
+        outsideSleepers.put(player.getUniqueId(),
+                new OutsideSleeper(body, sleeping, new HashSet<>()));
+        updateOutsideSleepers();
+    }
+
     public void moveSleeper(UUID playerId, JarRecord source, JarRecord target, Location location) {
         JarScene sourceScene = scenes.get(source.id());
         Avatar sleeper = sourceScene == null ? null : sourceScene.sleepers.remove(playerId);
@@ -230,7 +248,7 @@ public final class PreviewService {
             for (Player viewer : online(sourceScene.interiorViewers)) sleeper.body.destroy(viewer);
         } else {
             Player player = Bukkit.getPlayer(playerId);
-            if (player != null && player.isOnline()) sleep(player, target, location);
+            if (player != null && player.isOnline()) sleepInside(player, target, location);
             return;
         }
 
@@ -244,6 +262,10 @@ public final class PreviewService {
 
     public void wake(UUID playerId) {
         for (JarScene scene : scenes.values()) scene.removeAvatar(playerId, scene.sleepers);
+        OutsideSleeper outside = outsideSleepers.remove(playerId);
+        if (outside != null) {
+            for (Player viewer : online(outside.viewers)) outside.body.destroy(viewer);
+        }
     }
 
     public void preparePlayerTransition(Player player) {
@@ -304,7 +326,25 @@ public final class PreviewService {
             if (entityBackend != null) entityBackend.update(jar, scene.exteriorViewers, scene.interiorViewers);
         }
         for (UUID id : new ArrayList<>(scenes.keySet())) if (!valid.contains(id)) removeScene(id);
+        updateOutsideSleepers();
         updateChunkTickets();
+    }
+
+    private void updateOutsideSleepers() {
+        double radius = Math.max(32.0, exteriorViewerDistance);
+        double radiusSquared = radius * radius;
+        for (OutsideSleeper sleeper : outsideSleepers.values()) {
+            Set<UUID> viewers = new HashSet<>();
+            World world = sleeper.location.getWorld();
+            if (world != null) {
+                for (Player player : world.getPlayers()) {
+                    if (player.getLocation().distanceSquared(sleeper.location) <= radiusSquared) {
+                        viewers.add(player.getUniqueId());
+                    }
+                }
+            }
+            applyVisibility(sleeper.viewers, viewers, List.of(sleeper.body));
+        }
     }
 
     private JarScene replaceScene(JarScene previous, JarRecord jar) {
@@ -1384,6 +1424,7 @@ public final class PreviewService {
         }
     }
     private record Avatar(VirtualMannequin body) {}
+    private record OutsideSleeper(VirtualMannequin body, Location location, Set<UUID> viewers) {}
 
     private final class JarScene {
         private final JarRecord jar;

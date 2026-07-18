@@ -39,21 +39,40 @@ class SpectatorRecoveryTest {
 
     @Test void nonFiniteLocationsAreRejected() {
         assertThrows(IllegalArgumentException.class, () -> new SpectatorRecovery(
+                SpectatorRecovery.Kind.FOLLOW_CARRIER,
                 UUID.randomUUID(), UUID.randomUUID(), GameMode.SURVIVAL,
                 Double.NaN, 1, 1, 0, 0, "world", 0, 64, 0));
     }
 
     @Test void jarRecoveryRequiresANonSpectatorModeAndCarrier() {
         assertThrows(IllegalArgumentException.class, () -> new SpectatorRecovery(
+                SpectatorRecovery.Kind.FOLLOW_CARRIER,
                 UUID.randomUUID(), null, GameMode.SURVIVAL,
                 1, 1, 1, 0, 0, "world", 0, 64, 0));
         assertThrows(IllegalArgumentException.class, () -> new SpectatorRecovery(
+                SpectatorRecovery.Kind.FOLLOW_CARRIER,
                 UUID.randomUUID(), UUID.randomUUID(), GameMode.SPECTATOR,
                 1, 1, 1, 0, 0, "world", 0, 64, 0));
     }
 
+    @Test void inspectionKeepsItsOutsideBodyWhenJarChangesOrIsDeleted() {
+        SpectatorRecovery recovery = new SpectatorRecovery(SpectatorRecovery.Kind.INSPECT_JAR,
+                UUID.randomUUID(), UUID.randomUUID(), GameMode.CREATIVE,
+                0, 0, 0, 25, 5, "body-world", 4.5, 70, -8.5);
+
+        SpectatorRecovery remapped = recovery.remap(UUID.randomUUID(), 2, 1, -3, 32,
+                "jar-world", 100, 80, 100);
+        SpectatorRecovery deleted = remapped.fallback("jar-world", 101, 81, 101);
+
+        assertEquals("body-world", deleted.fallbackWorld());
+        assertEquals(4.5, deleted.fallbackX());
+        assertEquals(70, deleted.fallbackY());
+        assertEquals(-8.5, deleted.fallbackZ());
+    }
+
     private static SpectatorRecovery recovery(UUID jarId) {
-        return new SpectatorRecovery(jarId, UUID.randomUUID(), GameMode.ADVENTURE,
+        return new SpectatorRecovery(SpectatorRecovery.Kind.FOLLOW_CARRIER,
+                jarId, UUID.randomUUID(), GameMode.ADVENTURE,
                 12.25, 20.5, 6.75, 40, -10, "outside", 0.5, 65, 0.5);
     }
 }
