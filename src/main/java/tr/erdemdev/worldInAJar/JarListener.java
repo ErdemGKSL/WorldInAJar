@@ -25,6 +25,7 @@ import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
+import org.bukkit.event.player.PlayerToggleSneakEvent;
 import org.bukkit.event.weather.ThunderChangeEvent;
 import org.bukkit.event.weather.WeatherChangeEvent;
 import org.bukkit.inventory.EquipmentSlot;
@@ -268,6 +269,13 @@ public final class JarListener implements Listener {
             return;
         }
         interiors.syncSession(event.getPlayer(), event.getPlayer().getLocation(), repository);
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onToggleSneak(PlayerToggleSneakEvent event) {
+        if (!event.isSneaking() || !spectators.hasRecovery(event.getPlayer())) return;
+        event.setCancelled(true);
+        spectators.restore(event.getPlayer());
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
