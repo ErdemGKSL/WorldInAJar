@@ -6,6 +6,7 @@ import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.scheduler.BukkitTask;
@@ -91,6 +92,11 @@ public final class SpectatorService {
 
     public boolean hasRecovery(Player player) {
         return recoveries.containsKey(player.getUniqueId());
+    }
+
+    public boolean allowsTarget(Player player, Entity target) {
+        SpectatorRecovery recovery = recoveries.get(player.getUniqueId());
+        return recovery == null || target.getUniqueId().equals(recovery.carrierId());
     }
 
     public boolean restore(Player player) {

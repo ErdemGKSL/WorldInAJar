@@ -1,5 +1,6 @@
 package tr.erdemdev.worldInAJar;
 
+import com.destroystokyo.paper.event.player.PlayerStartSpectatingEntityEvent;
 import io.papermc.paper.event.entity.EntityMoveEvent;
 import io.papermc.paper.event.player.PlayerInventorySlotChangeEvent;
 import org.bukkit.Material;
@@ -276,6 +277,13 @@ public final class JarListener implements Listener {
         if (!event.isSneaking() || !spectators.hasRecovery(event.getPlayer())) return;
         event.setCancelled(true);
         spectators.restore(event.getPlayer());
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onStartSpectating(PlayerStartSpectatingEntityEvent event) {
+        if (!spectators.allowsTarget(event.getPlayer(), event.getNewSpectatorTarget())) {
+            event.setCancelled(true);
+        }
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
