@@ -425,6 +425,21 @@ public final class InteriorService {
                 relativeZ / jar.scale());
     }
 
+    public boolean containsAssemblyBounds(JarRecord jar, Location location) {
+        if (location.getWorld() != world) return false;
+        CellLayout.Cell c = cell(jar);
+        JarAssembly assembly = jar.assembly();
+        double minX = c.minX() + assembly.minX() * jar.scale();
+        double minY = c.minY() + assembly.minY() * jar.scale();
+        double minZ = c.minZ() + assembly.minZ() * jar.scale();
+        double maxX = c.minX() + assembly.maxX() * jar.scale();
+        double maxY = c.minY() + assembly.maxY() * jar.scale();
+        double maxZ = c.minZ() + assembly.maxZ() * jar.scale();
+        return location.getX() >= minX && location.getX() < maxX
+                && location.getY() >= minY && location.getY() < maxY
+                && location.getZ() >= minZ && location.getZ() < maxZ;
+    }
+
     public boolean isBoundary(JarRecord jar, Location location) {
         if (!contains(jar, location)) return false;
         CellLayout.Cell c = cell(jar);

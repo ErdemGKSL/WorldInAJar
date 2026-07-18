@@ -126,7 +126,7 @@ public final class SpectatorService {
         previews.sleepOutside(player, body);
         player.setGameMode(GameMode.SPECTATOR);
         Location entry = interiors.entryLocation(jar, player);
-        if (!interiors.contains(jar, entry) || !player.teleport(entry)) {
+        if (!interiors.containsAssemblyBounds(jar, entry) || !player.teleport(entry)) {
             restore(player);
             return StartResult.UNAVAILABLE;
         }
@@ -245,17 +245,17 @@ public final class SpectatorService {
                 if (player.getGameMode() != GameMode.SPECTATOR) player.setGameMode(GameMode.SPECTATOR);
                 continue;
             }
+            if (recovery.kind() == SpectatorRecovery.Kind.INSPECT_JAR) {
+                if (!interiors.containsAssemblyBounds(jar, player.getLocation())) restore(player, recovery);
+                continue;
+            }
             Player carrier = Bukkit.getPlayer(recovery.carrierId());
             if (carrier == null || !carrier.isOnline() || !contains(carrier, jar.id())) {
                 restore(player, recovery);
                 continue;
             }
             if (player.getGameMode() != GameMode.SPECTATOR) player.setGameMode(GameMode.SPECTATOR);
-            if (recovery.kind() == SpectatorRecovery.Kind.FOLLOW_CARRIER) {
-                if (player.getSpectatorTarget() != carrier) target(player, carrier);
-            } else if (!interiors.contains(jar, player.getLocation())) {
-                restore(player, recovery);
-            }
+            if (player.getSpectatorTarget() != carrier) target(player, carrier);
         }
     }
 
