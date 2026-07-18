@@ -19,7 +19,7 @@ public final class WorldInAJar extends JavaPlugin {
         interiors = new InteriorService(this); interiors.loadWorld();
         previews = new PreviewService(this, interiors);
         transfers = new PortalTransferService(this, repository, items, interiors);
-        spectators = new SpectatorService(this, repository, items, interiors);
+        spectators = new SpectatorService(this, repository, items, interiors, previews);
         // Recipe registrations survive some plugin managers' hot reload cycle. Remove the
         // old key first so enabling is idempotent instead of disabling the whole plugin.
         getServer().removeRecipe(recipeKey());

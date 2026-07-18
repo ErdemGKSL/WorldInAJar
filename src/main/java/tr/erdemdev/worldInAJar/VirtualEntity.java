@@ -231,6 +231,13 @@ final class VirtualMannequin extends VirtualEntity {
         }
     }
 
+    void sleep(Location location, Collection<Player> viewers) {
+        Location sleeping = location.clone();
+        sleeping.setPitch(90f);
+        positionSync(viewers, sleeping, sleeping.getYaw(), Vec3.ZERO, true);
+        nametag.update(nametagLocation(sleeping), viewers);
+    }
+
     @Override
     void spawn(Player viewer) {
         super.spawn(viewer);

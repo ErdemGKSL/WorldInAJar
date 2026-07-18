@@ -28,17 +28,19 @@ public final class SpectatorService {
     private final JarRepository repository;
     private final JarItems items;
     private final InteriorService interiors;
+    private final PreviewService previews;
     private final File file;
     private final Map<UUID, SpectatorRecovery> recoveries = new HashMap<>();
     private final Set<UUID> active = new HashSet<>();
     private BukkitTask task;
 
     public SpectatorService(WorldInAJar plugin, JarRepository repository, JarItems items,
-                            InteriorService interiors) {
+                            InteriorService interiors, PreviewService previews) {
         this.plugin = plugin;
         this.repository = repository;
         this.items = items;
         this.interiors = interiors;
+        this.previews = previews;
         file = new File(plugin.getDataFolder(), "spectators.yml");
     }
 
@@ -81,6 +83,7 @@ public final class SpectatorService {
         }
 
         active.add(player.getUniqueId());
+        previews.sleep(player, jar, location);
         player.setGameMode(GameMode.SPECTATOR);
         if (!player.teleport(carrier.getLocation()) || !target(player, carrier)) {
             restore(player);
@@ -135,9 +138,16 @@ public final class SpectatorService {
     public void prepareAttachment(JarRecord source, JarRecord target,
                                   int offsetX, int offsetY, int offsetZ) {
         Location fallback = fallback(target);
-        forJar(source.id(), (playerId, recovery) -> recoveries.put(playerId,
-                recovery.remap(target.id(), offsetX, offsetY, offsetZ, source.scale(),
-                        fallback.getWorld().getName(), fallback.getX(), fallback.getY(), fallback.getZ())));
+        forJar(source.id(), (playerId, recovery) -> {
+            SpectatorRecovery remapped = recovery.remap(target.id(), offsetX, offsetY, offsetZ,
+                    source.scale(), fallback.getWorld().getName(), fallback.getX(),
+                    fallback.getY(), fallback.getZ());
+            recoveries.put(playerId, remapped);
+            CellLayout.Cell cell = interiors.cell(target);
+            previews.moveSleeper(playerId, source, target, new Location(interiors.world(),
+                    cell.minX() + remapped.relativeX(), cell.minY() + remapped.relativeY(),
+                    cell.minZ() + remapped.relativeZ(), remapped.yaw(), 90f));
+        });
         save();
     }
 
@@ -147,6 +157,7 @@ public final class SpectatorService {
             SpectatorRecovery updated = recovery.fallback(fallback.getWorld().getName(),
                     fallback.getX(), fallback.getY(), fallback.getZ());
             recoveries.put(playerId, updated);
+            previews.wake(playerId);
             Player player = Bukkit.getPlayer(playerId);
             if (player != null && player.isOnline()) restore(player, updated);
         });
@@ -203,6 +214,7 @@ public final class SpectatorService {
             return false;
         }
         player.setGameMode(recovery.gameMode());
+        previews.wake(player.getUniqueId());
         active.remove(player.getUniqueId());
         recoveries.remove(player.getUniqueId());
         save();

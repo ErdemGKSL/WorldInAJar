@@ -155,9 +155,7 @@ public final class PreviewService {
         }
         JarScene scene = scenes.computeIfAbsent(jar.id(), ignored -> new JarScene(jar));
         if (!scene.jar.equals(jar)) {
-            scene.removeAll();
-            scene = new JarScene(jar);
-            scenes.put(jar.id(), scene);
+            scene = replaceScene(scene, jar);
         }
         refreshBlocks(scene, true, true);
         rebuildRoutes();
@@ -196,6 +194,41 @@ public final class PreviewService {
         }
     }
 
+    public void sleep(Player player, JarRecord jar, Location location) {
+        JarScene scene = scenes.computeIfAbsent(jar.id(), ignored -> new JarScene(jar));
+        if (!scene.jar.equals(jar)) scene = replaceScene(scene, jar);
+        scene.removeAvatar(player.getUniqueId(), scene.sleepers);
+        Location sleeping = location.clone();
+        sleeping.setPitch(90f);
+        VirtualMannequin body = new VirtualMannequin(player, sleeping, 1f);
+        body.sleep(sleeping, List.of());
+        scene.sleepers.put(player.getUniqueId(), new Avatar(body));
+        showTo(scene.interiorViewers, List.of(body));
+    }
+
+    public void moveSleeper(UUID playerId, JarRecord source, JarRecord target, Location location) {
+        JarScene sourceScene = scenes.get(source.id());
+        Avatar sleeper = sourceScene == null ? null : sourceScene.sleepers.remove(playerId);
+        if (sleeper != null) {
+            for (Player viewer : online(sourceScene.interiorViewers)) sleeper.body.destroy(viewer);
+        } else {
+            Player player = Bukkit.getPlayer(playerId);
+            if (player != null && player.isOnline()) sleep(player, target, location);
+            return;
+        }
+
+        JarScene targetScene = scenes.computeIfAbsent(target.id(), ignored -> new JarScene(target));
+        if (!targetScene.jar.equals(target)) targetScene = replaceScene(targetScene, target);
+        targetScene.removeAvatar(playerId, targetScene.sleepers);
+        sleeper.body.sleep(location, List.of());
+        targetScene.sleepers.put(playerId, sleeper);
+        showTo(targetScene.interiorViewers, List.of(sleeper.body));
+    }
+
+    public void wake(UUID playerId) {
+        for (JarScene scene : scenes.values()) scene.removeAvatar(playerId, scene.sleepers);
+    }
+
     public void preparePlayerTransition(Player player) {
         if (entityBackend != null) entityBackend.removeSource(player.getUniqueId());
     }
@@ -215,15 +248,15 @@ public final class PreviewService {
             valid.add(jar.id());
             if (!jar.placed()) {
                 if (entityBackend != null) entityBackend.remove(jar.id());
-                if (interiors.occupants(jar).isEmpty()) {
+                JarScene existing = scenes.get(jar.id());
+                if (interiors.occupants(jar).isEmpty()
+                        && (existing == null || existing.sleepers.isEmpty())) {
                     removeScene(jar.id());
                     continue;
                 }
                 JarScene scene = scenes.computeIfAbsent(jar.id(), ignored -> new JarScene(jar));
                 if (!scene.jar.equals(jar)) {
-                    scene.removeAll();
-                    scene = new JarScene(jar);
-                    scenes.put(jar.id(), scene);
+                    scene = replaceScene(scene, jar);
                 }
                 if (!scene.sealed) spawnSealedSurfaces(scene);
                 updateSealedViewers(scene);
@@ -237,8 +270,7 @@ public final class PreviewService {
             }
             boolean newScene = replaceScene;
             if (replaceScene) {
-                if (scene != null) scene.removeAll();
-                scene = new JarScene(jar);
+                scene = scene == null ? new JarScene(jar) : replaceScene(scene, jar);
                 scenes.put(jar.id(), scene);
             }
             updateViewers(scene);
@@ -256,6 +288,19 @@ public final class PreviewService {
         }
         for (UUID id : new ArrayList<>(scenes.keySet())) if (!valid.contains(id)) removeScene(id);
         updateChunkTickets();
+    }
+
+    private JarScene replaceScene(JarScene previous, JarRecord jar) {
+        Map<UUID, Avatar> sleepers = new HashMap<>(previous.sleepers);
+        for (Player viewer : online(previous.interiorViewers)) {
+            for (Avatar sleeper : sleepers.values()) sleeper.body.destroy(viewer);
+        }
+        previous.sleepers.clear();
+        previous.removeAll();
+        JarScene replacement = new JarScene(jar);
+        replacement.sleepers.putAll(sleepers);
+        scenes.put(jar.id(), replacement);
+        return replacement;
     }
 
     private void updateViewers(JarScene scene) {
@@ -1332,6 +1377,7 @@ public final class PreviewService {
         private final List<VirtualBlockDisplay> interiorBlocks = new ArrayList<>();
         private final Map<UUID, Avatar> occupants = new HashMap<>();
         private final Map<UUID, Avatar> outsiders = new HashMap<>();
+        private final Map<UUID, Avatar> sleepers = new HashMap<>();
         private final Set<UUID> exteriorViewers = new HashSet<>();
         private final Set<UUID> interiorViewers = new HashSet<>();
         private final Set<UUID> insetPortalViewers = new HashSet<>();
@@ -1374,6 +1420,7 @@ public final class PreviewService {
         private List<VirtualEntity> interiorEntities() {
             List<VirtualEntity> entities = new ArrayList<>(interiorBlocks);
             for (Avatar avatar : outsiders.values()) entities.add(avatar.body);
+            for (Avatar avatar : sleepers.values()) entities.add(avatar.body);
             return entities;
         }
 
@@ -1388,7 +1435,8 @@ public final class PreviewService {
             removeEntities(interiorBlocks, interiorViewers);
             for (Player viewer : online(exteriorViewers)) for (Avatar avatar : occupants.values()) avatar.body.destroy(viewer);
             for (Player viewer : online(interiorViewers)) for (Avatar avatar : outsiders.values()) avatar.body.destroy(viewer);
-            exteriorBlocks.clear(); interiorBlocks.clear(); occupants.clear(); outsiders.clear();
+            for (Player viewer : online(interiorViewers)) for (Avatar avatar : sleepers.values()) avatar.body.destroy(viewer);
+            exteriorBlocks.clear(); interiorBlocks.clear(); occupants.clear(); outsiders.clear(); sleepers.clear();
             exteriorPortal = null;
             exteriorViewers.clear(); interiorViewers.clear(); insetPortalViewers.clear();
         }
