@@ -1,7 +1,9 @@
 package tr.erdemdev.worldInAJar;
 
+import net.minecraft.network.protocol.game.ClientboundSetCameraPacket;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
+import org.bukkit.craftbukkit.entity.CraftPlayer;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.configuration.ConfigurationSection;
@@ -100,7 +102,7 @@ public final class SpectatorService {
         plugin.getServer().getScheduler().runTask(plugin, () -> {
             if (!active.contains(player.getUniqueId()) || !player.isOnline()) return;
             Player online = Bukkit.getPlayer(carrierId);
-            if (online != null && online.isOnline()) target(player, online);
+            if (online != null && online.isOnline() && target(player, online)) lockCamera(player, online);
         });
         player.sendMessage("§aYou are now inside the player carrying this jar. Sneak to return.");
         return StartResult.STARTED;
@@ -278,6 +280,7 @@ public final class SpectatorService {
             if (player.getGameMode() != GameMode.SPECTATOR) player.setGameMode(GameMode.SPECTATOR);
             Entity current = player.getSpectatorTarget();
             if (current == null || !carrier.getUniqueId().equals(current.getUniqueId())) target(player, carrier);
+            lockCamera(player, carrier);
         }
     }
 
@@ -331,6 +334,17 @@ public final class SpectatorService {
                     + ": " + exception.getMessage());
             return false;
         }
+    }
+
+    /**
+     * Re-latches the spectator's client camera onto the carrier at the packet level. The vanilla
+     * client detaches its camera on any movement input without informing the server, so re-sending
+     * the camera packet each tick keeps the view locked inside the carrier — you cannot fly off.
+     */
+    private void lockCamera(Player spectator, Player carrier) {
+        if (spectator.getGameMode() != GameMode.SPECTATOR || spectator.equals(carrier)) return;
+        ((CraftPlayer) spectator).getHandle().connection.send(
+                new ClientboundSetCameraPacket(((CraftPlayer) carrier).getHandle()));
     }
 
     private Player findCarrier(UUID jarId, UUID spectatorId) {
