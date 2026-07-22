@@ -296,9 +296,9 @@ public final class JarListener implements Listener {
 
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onStartSpectating(PlayerStartSpectatingEntityEvent event) {
-        if (!spectators.allowsTarget(event.getPlayer(), event.getNewSpectatorTarget())) {
-            event.setCancelled(true);
-        }
+        if (spectators.allowsTarget(event.getPlayer(), event.getNewSpectatorTarget())) return;
+        event.setCancelled(true);
+        spectators.leaveOnForeignTarget(event.getPlayer());
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)

@@ -89,11 +89,20 @@ public final class SpectatorService {
         active.add(player.getUniqueId());
         previews.sleepInside(player, jar, location);
         player.setGameMode(GameMode.SPECTATOR);
-        if (!player.teleport(carrier.getLocation()) || !target(player, carrier)) {
+        if (!player.teleport(carrier.getLocation())) {
             restore(player);
             return StartResult.UNAVAILABLE;
         }
-        player.sendMessage("§aYou are spectating the player carrying this jar.");
+        // The camera only latches onto the carrier once the client has acknowledged the game-mode
+        // switch; latching in this same tick is silently dropped, leaving a free spectator nearby.
+        // Apply it next tick, then tick() keeps re-latching so the player stays locked inside.
+        UUID carrierId = carrier.getUniqueId();
+        plugin.getServer().getScheduler().runTask(plugin, () -> {
+            if (!active.contains(player.getUniqueId()) || !player.isOnline()) return;
+            Player online = Bukkit.getPlayer(carrierId);
+            if (online != null && online.isOnline()) target(player, online);
+        });
+        player.sendMessage("§aYou are now inside the player carrying this jar. Sneak to return.");
         return StartResult.STARTED;
     }
 
@@ -147,6 +156,18 @@ public final class SpectatorService {
     public boolean allowsTarget(Player player, Entity target) {
         SpectatorRecovery recovery = recoveries.get(player.getUniqueId());
         return recovery == null || target.getUniqueId().equals(recovery.carrierId());
+    }
+
+    /**
+     * A spectator locked onto the jar carrier tried to spectate someone else. Rather than keeping
+     * them pinned to the carrier, drop them out of spectator mode entirely on the next tick.
+     */
+    public void leaveOnForeignTarget(Player player) {
+        SpectatorRecovery recovery = recoveries.get(player.getUniqueId());
+        if (recovery == null || recovery.kind() != SpectatorRecovery.Kind.FOLLOW_CARRIER) return;
+        plugin.getServer().getScheduler().runTask(plugin, () -> {
+            if (player.isOnline()) restore(player, recovery);
+        });
     }
 
     public boolean restore(Player player) {
@@ -255,7 +276,8 @@ public final class SpectatorService {
                 continue;
             }
             if (player.getGameMode() != GameMode.SPECTATOR) player.setGameMode(GameMode.SPECTATOR);
-            if (player.getSpectatorTarget() != carrier) target(player, carrier);
+            Entity current = player.getSpectatorTarget();
+            if (current == null || !carrier.getUniqueId().equals(current.getUniqueId())) target(player, carrier);
         }
     }
 
