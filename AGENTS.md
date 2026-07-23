@@ -30,7 +30,9 @@ Service layer (each a field of the plugin main):
 - **JarRepository** — persistence to `jars.yml` via an async single-thread saver; holds `JarRecord`s (immutable, with validated `JarAssembly` geometry cached) and allocates cell indices.
 - **InteriorService** — owns the interior world, cell readiness, and a per-tick work queue for interior world edits (budgeted by `combination-blocks-per-tick` / `combination-max-millis-per-tick` in config); tracks player sessions inside jars and retains chunks it needs.
 - **PreviewService** — the largest class. Builds viewer-specific, display-only virtual scenes in both directions: interior blocks rendered as block displays at the jar's exterior, and outside blocks rendered around occupants inside. Uses fingerprinting to rebuild block scenes only on change, chunk snapshots taken off-thread, and per-tick budgets for snapshots/chunk tickets.
-- **PortalTransferService** — moves players, items, and entities through jar portals, with per-entity cooldowns.
+- **PortalTransferService** — moves players, items, and entities through jar portals, with per-entity cooldowns; also computes a jar's `realWorldAnchor` (its placed blocks, dropped item, carrying player, or container).
+- **TeleportPolicy** — marks plugin-issued teleports so the boundary guard in `JarListener` can block/redirect all external teleports crossing between the interior world and the outside; any new code path that legitimately crosses must call `policy.teleport(...)`.
+- **JarBackService** — tracks continuous holding of jar items (config `jar.last-holder-minutes`) to persist a per-jar "last holder", and serves the `/jar back` chest menu that recalls those jars.
 - **JarListener** — all Bukkit event handling (place/break/interact, jar combination) delegating to the services.
 - **JarItems** — item stacks, PDC keys, and crafting recipes.
 

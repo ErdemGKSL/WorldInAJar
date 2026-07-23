@@ -24,6 +24,7 @@ import java.util.function.Consumer;
 
 public final class InteriorService {
     private final JavaPlugin plugin;
+    private final TeleportPolicy policy;
     private final String worldName;
     private final int gap;
     private final int baseY;
@@ -42,8 +43,9 @@ public final class InteriorService {
     private BukkitTask worldJobTask;
     private boolean operationActive;
 
-    public InteriorService(JavaPlugin plugin) {
+    public InteriorService(JavaPlugin plugin, TeleportPolicy policy) {
         this.plugin = plugin;
+        this.policy = policy;
         worldName = plugin.getConfig().getString("interior.world", "world_in_a_jar");
         gap = plugin.getConfig().getInt("interior.cell-gap", 8);
         baseY = plugin.getConfig().getInt("interior.base-y", 64);
@@ -212,11 +214,23 @@ public final class InteriorService {
         if (!jar.hasPortal()) return;
         if (!ensureBuilt(jar)) return;
         sessions.put(player.getUniqueId(), jar.id());
-        if (player.teleport(entryLocation(jar, player))) {
+        if (policy.teleport(player, entryLocation(jar, player))) {
             applyEnvironment(player, jar);
         } else {
             sessions.remove(player.getUniqueId());
         }
+    }
+
+    /** Admin entry that works without a portal side and regardless of clogging. */
+    public boolean forceEnter(Player player, JarRecord jar) {
+        if (!ensureBuilt(jar)) return false;
+        sessions.put(player.getUniqueId(), jar.id());
+        if (policy.teleport(player, entryLocation(jar, player))) {
+            applyEnvironment(player, jar);
+            return true;
+        }
+        sessions.remove(player.getUniqueId());
+        return false;
     }
 
     public Location entryLocation(JarRecord jar, Player player) {
@@ -251,7 +265,7 @@ public final class InteriorService {
         if (isClogged(jar)) return ExitResult.CLOGGED;
         Location destination = jar.doorBlockLocation().add(.5, .2, .5)
                 .add(jar.door().getModX() * 1.5, 0, jar.door().getModZ() * 1.5);
-        if (!player.teleport(destination)) return ExitResult.NOT_INSIDE;
+        if (!policy.teleport(player, destination)) return ExitResult.NOT_INSIDE;
         sessions.remove(player.getUniqueId());
         resetEnvironment(player);
         return ExitResult.EXITED;
@@ -317,7 +331,7 @@ public final class InteriorService {
             Location destination = doorBlock == null ? Bukkit.getWorlds().getFirst().getSpawnLocation()
                     : doorBlock.clone().add(.5, .2, .5)
                     .add(jar.door().getModX() * 1.5, 0, jar.door().getModZ() * 1.5);
-            player.teleport(destination);
+            policy.teleport(player, destination);
             resetEnvironment(player);
         }
 

@@ -12,6 +12,9 @@ jar:
   # Horizontal size is also constrained by interior.allocation-stride; height is constrained
   # by the interior world's build limit.
   max-combined-size: 9
+  # Minutes a player must continuously keep a jar item in their inventory before they become
+  # its "last holder", allowing them to recall it later with /jar back.
+  last-holder-minutes: 5
 
 interior:
   world: world_in_a_jar

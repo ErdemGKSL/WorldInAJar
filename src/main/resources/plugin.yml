@@ -8,7 +8,7 @@ softdepend: [ProtocolLib]
 commands:
   jar:
     description: Manage World in a Jar
-    usage: /jar <create|give|list|reload|exit>
+    usage: /jar <create|give|list|reload|exit|back|admin>
     aliases: [worldinajar, wiaj]
 permissions:
   worldinajar.enter:
@@ -16,6 +16,9 @@ permissions:
     default: true
   worldinajar.exit:
     description: Exit a jar with the command
+    default: true
+  worldinajar.back:
+    description: Retrieve jars you were the last holder of with /jar back
     default: true
   worldinajar.create:
     description: Create a blank jar item
@@ -30,7 +33,7 @@ permissions:
     description: Reload configuration and persistence
     default: op
   worldinajar.admin:
-    description: Pick up any jar without owner sneak restrictions
+    description: Administrative jar commands (/jar admin info|enter|exit) and unrestricted pickup
     default: op
     children:
       worldinajar.give: true

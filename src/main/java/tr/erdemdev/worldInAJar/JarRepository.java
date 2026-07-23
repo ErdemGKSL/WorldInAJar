@@ -19,6 +19,7 @@ public final class JarRepository {
     private final File file;
     private final Map<UUID, JarRecord> records = new HashMap<>();
     private final Map<UUID, JarRecord> portalRecords = new HashMap<>();
+    private final Map<UUID, JarMeta> metadata = new HashMap<>();
     private final Collection<JarRecord> recordsView = Collections.unmodifiableCollection(records.values());
     private final Collection<JarRecord> portalRecordsView = Collections.unmodifiableCollection(portalRecords.values());
     private final ExecutorService saver = Executors.newSingleThreadExecutor(runnable ->
@@ -34,6 +35,7 @@ public final class JarRepository {
         flushAsyncSaves();
         records.clear();
         portalRecords.clear();
+        metadata.clear();
         YamlConfiguration yaml = YamlConfiguration.loadConfiguration(file);
         nextCell = yaml.getInt("next-cell", 0);
         ConfigurationSection jars = yaml.getConfigurationSection("jars");
@@ -63,6 +65,7 @@ public final class JarRepository {
                         yaml.getInt(path + "cell"), yaml.getInt(path + "scale", 60),
                         parts, placed);
                 store(record);
+                metadata.put(id, loadMeta(yaml, path));
                 nextCell = Math.max(nextCell, record.cell() + 1);
             } catch (RuntimeException exception) {
                 plugin.getLogger().warning("Skipping invalid jar record " + key + ": " + exception.getMessage());
@@ -102,7 +105,7 @@ public final class JarRepository {
     }
 
     private RepositorySnapshot snapshot() {
-        return new RepositorySnapshot(nextCell, List.copyOf(records.values()));
+        return new RepositorySnapshot(nextCell, List.copyOf(records.values()), Map.copyOf(metadata));
     }
 
     private void write(RepositorySnapshot snapshot) {
@@ -126,6 +129,17 @@ public final class JarRepository {
                 return values;
             }).toList());
             yaml.set(path + "placed", record.placed());
+            JarMeta meta = snapshot.metadata().get(record.id());
+            if (meta != null) {
+                yaml.set(path + "name", meta.name());
+                yaml.set(path + "last-holder", meta.lastHolder() == null ? null : meta.lastHolder().toString());
+                if (meta.respawn() != null) {
+                    yaml.set(path + "respawn.x", meta.respawn().x());
+                    yaml.set(path + "respawn.y", meta.respawn().y());
+                    yaml.set(path + "respawn.z", meta.respawn().z());
+                    yaml.set(path + "respawn.yaw", meta.respawn().yaw());
+                }
+            }
         }
         try { yaml.save(file); }
         catch (IOException exception) { plugin.getLogger().severe("Could not save jars.yml: " + exception.getMessage()); }
@@ -163,6 +177,7 @@ public final class JarRepository {
     public Optional<JarRecord> remove(UUID id) {
         JarRecord removed = records.remove(id);
         portalRecords.remove(id);
+        metadata.remove(id);
         if (removed != null) saveAsync();
         return Optional.ofNullable(removed);
     }
@@ -207,5 +222,75 @@ public final class JarRepository {
         return value == null ? fallback : number(value);
     }
 
-    private record RepositorySnapshot(int nextCell, List<JarRecord> records) {}
+    public String name(UUID id) {
+        JarMeta meta = metadata.get(id);
+        return meta == null ? null : meta.name();
+    }
+
+    public void rename(UUID id, String name) {
+        if (!records.containsKey(id)) return;
+        String stored = name == null || name.isBlank() ? null : name;
+        metadata.merge(id, new JarMeta(stored, null, null),
+                (existing, ignored) -> new JarMeta(stored, existing.lastHolder(), existing.respawn()));
+        saveAsync();
+    }
+
+    public Optional<JarRecord> byName(String name) {
+        for (Map.Entry<UUID, JarMeta> entry : metadata.entrySet()) {
+            if (entry.getValue().name() != null && entry.getValue().name().equalsIgnoreCase(name)) {
+                return byId(entry.getKey());
+            }
+        }
+        return Optional.empty();
+    }
+
+    public Collection<String> names() {
+        return metadata.values().stream().map(JarMeta::name).filter(Objects::nonNull).toList();
+    }
+
+    public UUID lastHolder(UUID id) {
+        JarMeta meta = metadata.get(id);
+        return meta == null ? null : meta.lastHolder();
+    }
+
+    public void setLastHolder(UUID id, UUID player) {
+        if (!records.containsKey(id)) return;
+        metadata.merge(id, new JarMeta(null, player, null),
+                (existing, ignored) -> new JarMeta(existing.name(), player, existing.respawn()));
+        saveAsync();
+    }
+
+    public Location respawn(UUID id, org.bukkit.World interiorWorld) {
+        JarMeta meta = metadata.get(id);
+        if (meta == null || meta.respawn() == null || interiorWorld == null) return null;
+        RespawnPoint point = meta.respawn();
+        return new Location(interiorWorld, point.x(), point.y(), point.z(), point.yaw(), 0f);
+    }
+
+    public void setRespawn(UUID id, Location location) {
+        if (!records.containsKey(id)) return;
+        RespawnPoint point = new RespawnPoint(location.getX(), location.getY(),
+                location.getZ(), location.getYaw());
+        metadata.merge(id, new JarMeta(null, null, point),
+                (existing, ignored) -> new JarMeta(existing.name(), existing.lastHolder(), point));
+        saveAsync();
+    }
+
+    private JarMeta loadMeta(YamlConfiguration yaml, String path) {
+        String holderValue = yaml.getString(path + "last-holder");
+        UUID holder = null;
+        try { holder = holderValue == null ? null : UUID.fromString(holderValue); }
+        catch (IllegalArgumentException ignored) {}
+        RespawnPoint respawn = yaml.contains(path + "respawn.x")
+                ? new RespawnPoint(yaml.getDouble(path + "respawn.x"), yaml.getDouble(path + "respawn.y"),
+                yaml.getDouble(path + "respawn.z"), (float) yaml.getDouble(path + "respawn.yaw"))
+                : null;
+        return new JarMeta(yaml.getString(path + "name"), holder, respawn);
+    }
+
+    private record JarMeta(String name, UUID lastHolder, RespawnPoint respawn) {}
+    private record RespawnPoint(double x, double y, double z, float yaw) {}
+
+    private record RepositorySnapshot(int nextCell, List<JarRecord> records,
+                                      Map<UUID, JarMeta> metadata) {}
 }

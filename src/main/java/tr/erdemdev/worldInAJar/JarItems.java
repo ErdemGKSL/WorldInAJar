@@ -48,13 +48,19 @@ public final class JarItems {
     }
 
     public ItemStack create(UUID id, JarAssembly assembly, int scale, Collection<String> occupantNames) {
+        return create(id, assembly, scale, occupantNames, null);
+    }
+
+    public ItemStack create(UUID id, JarAssembly assembly, int scale,
+                            Collection<String> occupantNames, String customName) {
         assembly = assembly.normalized();
         JarAssembly storedAssembly = assembly;
         ItemStack item = new ItemStack(Material.GLASS);
         item.editMeta(meta -> {
             String dimensions = storedAssembly.width() + "x" + storedAssembly.height()
                     + "x" + storedAssembly.depth();
-            meta.displayName(Component.text(storedAssembly.cells().size() == 1
+            meta.displayName(Component.text(customName != null && !customName.isBlank() ? customName
+                    : storedAssembly.cells().size() == 1
                     ? "World in a Jar" : "Combined World Jar (" + dimensions + ")"));
             meta.lore(lore(id, storedAssembly, occupantNames));
             meta.setMaxStackSize(1);

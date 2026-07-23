@@ -31,6 +31,7 @@ public final class SpectatorService {
     private final JarItems items;
     private final InteriorService interiors;
     private final PreviewService previews;
+    private final TeleportPolicy policy;
     private final File file;
     private final Map<UUID, SpectatorRecovery> recoveries = new HashMap<>();
     private final Set<UUID> active = new HashSet<>();
@@ -39,12 +40,13 @@ public final class SpectatorService {
     private long tick;
 
     public SpectatorService(WorldInAJar plugin, JarRepository repository, JarItems items,
-                            InteriorService interiors, PreviewService previews) {
+                            InteriorService interiors, PreviewService previews, TeleportPolicy policy) {
         this.plugin = plugin;
         this.repository = repository;
         this.items = items;
         this.interiors = interiors;
         this.previews = previews;
+        this.policy = policy;
         file = new File(plugin.getDataFolder(), "spectators.yml");
     }
 
@@ -91,7 +93,7 @@ public final class SpectatorService {
         active.add(player.getUniqueId());
         previews.sleepInside(player, jar, location);
         player.setGameMode(GameMode.SPECTATOR);
-        if (!player.teleport(carrier.getLocation())) {
+        if (!policy.teleport(player, carrier.getLocation())) {
             restore(player);
             return StartResult.UNAVAILABLE;
         }
@@ -137,7 +139,7 @@ public final class SpectatorService {
         previews.sleepOutside(player, body);
         player.setGameMode(GameMode.SPECTATOR);
         Location entry = interiors.entryLocation(jar, player);
-        if (!interiors.containsAssemblyBounds(jar, entry) || !player.teleport(entry)) {
+        if (!interiors.containsAssemblyBounds(jar, entry) || !policy.teleport(player, entry)) {
             restore(player);
             return StartResult.UNAVAILABLE;
         }
@@ -302,7 +304,7 @@ public final class SpectatorService {
         }
 
         if (player.getGameMode() == GameMode.SPECTATOR) player.setSpectatorTarget(null);
-        if (!player.teleport(destination)) {
+        if (!policy.teleport(player, destination)) {
             if (active.contains(player.getUniqueId())) {
                 Player carrier = Bukkit.getPlayer(recovery.carrierId());
                 if (carrier != null && carrier.isOnline()) target(player, carrier);
@@ -327,7 +329,7 @@ public final class SpectatorService {
     private boolean target(Player spectator, Player carrier) {
         if (spectator.equals(carrier) || spectator.getGameMode() != GameMode.SPECTATOR) return false;
         try {
-            spectator.setSpectatorTarget(carrier);
+            policy.permitted(spectator, () -> spectator.setSpectatorTarget(carrier));
             return true;
         } catch (IllegalStateException exception) {
             plugin.getLogger().warning("Could not set spectator target for " + spectator.getName()

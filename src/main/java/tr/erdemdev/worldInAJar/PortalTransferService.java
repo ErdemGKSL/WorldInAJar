@@ -34,17 +34,19 @@ public final class PortalTransferService {
     private final JarRepository repository;
     private final JarItems items;
     private final InteriorService interiors;
+    private final TeleportPolicy policy;
     private final Map<UUID, Location> previousItemLocations = new HashMap<>();
     private final Map<Entity, Long> cooldowns = new IdentityHashMap<>();
     private BukkitTask itemTask;
     private long tick;
 
     public PortalTransferService(JavaPlugin plugin, JarRepository repository, JarItems items,
-                                 InteriorService interiors) {
+                                 InteriorService interiors, TeleportPolicy policy) {
         this.plugin = plugin;
         this.repository = repository;
         this.items = items;
         this.interiors = interiors;
+        this.policy = policy;
     }
 
     public void start() {
@@ -233,9 +235,14 @@ public final class PortalTransferService {
             item.setItemStack(remainder);
         }
         Vector velocity = entity.getVelocity().clone();
-        if (!entity.teleport(insideDestination(jar, entity))) return;
+        if (!teleport(entity, insideDestination(jar, entity))) return;
         markTransferred(entity);
         entity.setVelocity(velocity);
+    }
+
+    private boolean teleport(Entity entity, Location destination) {
+        return entity instanceof Player player
+                ? policy.teleport(player, destination) : entity.teleport(destination);
     }
 
     /** Returns the portion that did not fit, or null when attached hoppers accepted everything. */
@@ -264,7 +271,7 @@ public final class PortalTransferService {
             return;
         }
         Vector velocity = entity.getVelocity().clone();
-        if (!entity.teleport(outsideDestination(jar, entity))) return;
+        if (!teleport(entity, outsideDestination(jar, entity))) return;
         markTransferred(entity);
         entity.setVelocity(velocity);
     }
@@ -282,7 +289,7 @@ public final class PortalTransferService {
             return;
         }
         Vector velocity = entity.getVelocity().clone();
-        if (!entity.teleport(outside.clone().add(0, .2, 0))) return;
+        if (!teleport(entity, outside.clone().add(0, .2, 0))) return;
         markTransferred(entity);
         entity.setVelocity(velocity);
     }
@@ -320,6 +327,21 @@ public final class PortalTransferService {
         Location location = jar.outsideLocation();
         if (location == null) throw new IllegalStateException("The jar's outside world is not loaded");
         return location.getWorld();
+    }
+
+    /**
+     * The jar's presence in the real world: on top of its glass blocks when placed, otherwise at
+     * whatever carries the jar item — a dropped item's location, the carrying player, or on top
+     * of the container block holding it.
+     */
+    public Location realWorldAnchor(JarRecord jar) {
+        if (jar.placed()) {
+            Location origin = jar.outsideLocation();
+            if (origin != null) return origin.add(jar.width() / 2.0, jar.height(), jar.depth() / 2.0);
+            return fallbackOutside(jar);
+        }
+        Carrier carrier = findCarrier(jar.id());
+        return carrier == null ? fallbackOutside(jar) : carrier.location().clone();
     }
 
     private Carrier findCarrier(UUID jarId) {

@@ -17,9 +17,13 @@ import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.entity.EntityRemoveEvent;
 import org.bukkit.event.entity.ItemMergeEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
+import org.bukkit.Tag;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.ClickType;
 import org.bukkit.event.inventory.InventoryOpenEvent;
+import org.bukkit.event.inventory.InventoryType;
+import org.bukkit.event.inventory.PrepareAnvilEvent;
 import org.bukkit.event.inventory.PrepareItemCraftEvent;
 import org.bukkit.event.inventory.CraftItemEvent;
 import org.bukkit.event.player.PlayerChangedWorldEvent;
@@ -37,11 +41,14 @@ import org.bukkit.event.weather.WeatherChangeEvent;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.ItemMeta;
 
 import java.util.UUID;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
@@ -54,16 +61,18 @@ public final class JarListener implements Listener {
     private final PreviewService previews;
     private final PortalTransferService transfers;
     private final SpectatorService spectators;
+    private final TeleportPolicy policy;
     private final Set<UUID> combinationsInProgress = new java.util.HashSet<>();
+    private final Map<UUID, UUID> deathJars = new HashMap<>();
 
     public JarListener(WorldInAJar plugin, JarRepository repository, JarItems items,
                        JarItemLoreService itemLore,
                        InteriorService interiors, PreviewService previews, PortalTransferService transfers,
-                       SpectatorService spectators) {
+                       SpectatorService spectators, TeleportPolicy policy) {
         this.plugin = plugin; this.repository = repository; this.items = items;
         this.itemLore = itemLore;
         this.interiors = interiors; this.previews = previews; this.transfers = transfers;
-        this.spectators = spectators;
+        this.spectators = spectators; this.policy = policy;
     }
 
     @EventHandler(priority = EventPriority.HIGHEST)
@@ -184,7 +193,7 @@ public final class JarListener implements Listener {
             placeFootprint(current, Material.AIR);
             event.getBlock().getWorld().dropItemNaturally(event.getBlock().getLocation(),
                     items.create(current.id(), current.assembly(), current.scale(),
-                            itemLore.playerNames(current)));
+                            itemLore.playerNames(current), repository.name(current.id())));
         });
     }
 
@@ -269,6 +278,7 @@ public final class JarListener implements Listener {
 
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
+        deathJars.remove(event.getPlayer().getUniqueId());
         UUID previous = interiors.sessionId(event.getPlayer());
         spectators.onQuit(event.getPlayer());
         interiors.forget(event.getPlayer());
@@ -325,6 +335,36 @@ public final class JarListener implements Listener {
         refreshAfterTransition(event.getPlayer(), event.getPlayer().getLocation(), event.getRespawnLocation());
     }
 
+    /**
+     * Keeps jar interiors and the real world separate: external teleports may never cross the
+     * boundary. Plugin-driven moves (portals, spectating, admin commands) pass through
+     * {@link TeleportPolicy} and are exempt. Outside-to-inside teleports are redirected to the
+     * jar's real-world anchor: the dropped item, the carrying player, or on top of the container
+     * or placed jar. Inside-to-outside teleports are blocked entirely.
+     */
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onBoundaryTeleport(PlayerTeleportEvent event) {
+        boolean fromInside = event.getFrom().getWorld() == interiors.world();
+        boolean toInside = event.getTo().getWorld() == interiors.world();
+        if (fromInside == toInside || policy.isPermitted(event.getPlayer())) return;
+        if (fromInside) {
+            event.setCancelled(true);
+            event.getPlayer().sendMessage("§cYou cannot teleport out of a jar.");
+            return;
+        }
+        JarRecord jar = jarAt(event.getTo());
+        Location anchor = jar == null ? null : transfers.realWorldAnchor(jar);
+        if (anchor == null || anchor.getWorld() == interiors.world()) {
+            event.setCancelled(true);
+            event.getPlayer().sendMessage("§cYou cannot teleport into a jar from outside.");
+            return;
+        }
+        anchor.setYaw(event.getTo().getYaw());
+        anchor.setPitch(event.getTo().getPitch());
+        event.setTo(anchor);
+        event.getPlayer().sendMessage("§eThat destination is inside a jar. You were brought to the jar itself.");
+    }
+
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onTeleport(PlayerTeleportEvent event) {
         if (event.getFrom().getWorld() != event.getTo().getWorld()) {
@@ -347,12 +387,76 @@ public final class JarListener implements Listener {
     @EventHandler(priority = EventPriority.MONITOR)
     public void onDeath(PlayerDeathEvent event) {
         UUID jarId = interiors.sessionId(event.getPlayer());
-        plugin.getServer().getScheduler().runTask(plugin, () -> itemLore.refresh(jarId));
+        if (jarId == null) {
+            JarRecord jar = jarAt(event.getPlayer().getLocation());
+            jarId = jar == null ? null : jar.id();
+        }
+        if (jarId != null) deathJars.put(event.getPlayer().getUniqueId(), jarId);
+        UUID refreshId = jarId;
+        plugin.getServer().getScheduler().runTask(plugin, () -> itemLore.refresh(refreshId));
+    }
+
+    /**
+     * Deaths inside a jar respawn inside the same jar: at the jar's saved bed respawn point when
+     * one is set and still valid, otherwise at the jar's entry position. The real-world respawn
+     * location is never used for deaths inside jars.
+     */
+    @EventHandler(priority = EventPriority.HIGH)
+    public void onRespawnInsideJar(PlayerRespawnEvent event) {
+        UUID jarId = deathJars.remove(event.getPlayer().getUniqueId());
+        if (jarId == null) return;
+        JarRecord jar = repository.byId(jarId).orElse(null);
+        if (jar == null) return;
+        interiors.ensureBuilt(jar);
+        Location respawn = repository.respawn(jarId, interiors.world());
+        if (respawn == null || !interiors.contains(jar, respawn)) {
+            respawn = interiors.entryLocation(jar, event.getPlayer());
+        }
+        event.setRespawnLocation(respawn);
+    }
+
+    /**
+     * Beds inside jars never set the vanilla spawn point; right-clicking one instead saves a
+     * per-jar respawn location used for deaths inside that jar.
+     */
+    @EventHandler(priority = EventPriority.LOW)
+    public void onBedInsideJar(PlayerInteractEvent event) {
+        if (event.getAction() != Action.RIGHT_CLICK_BLOCK || event.getHand() != EquipmentSlot.HAND) return;
+        Block block = event.getClickedBlock();
+        if (block == null || block.getWorld() != interiors.world()
+                || !Tag.BEDS.isTagged(block.getType())) return;
+        JarRecord jar = jarAt(block.getLocation());
+        if (jar == null) return;
+        event.setCancelled(true);
+        Location respawn = block.getLocation().add(.5, .5625, .5);
+        respawn.setYaw(event.getPlayer().getLocation().getYaw());
+        repository.setRespawn(jar.id(), respawn);
+        event.getPlayer().sendMessage("§aRespawn point set for this jar.");
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onInventoryOpen(InventoryOpenEvent event) {
         itemLore.refreshInventory(event.getInventory());
+    }
+
+    /** Jars may be renamed in anvils but never used as repair material. */
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onPrepareAnvil(PrepareAnvilEvent event) {
+        if (items.isJar(event.getInventory().getSecondItem())) event.setResult(null);
+    }
+
+    /** Persists an anvil rename so the jar keeps its name in menus, commands, and future drops. */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onAnvilRename(InventoryClickEvent event) {
+        if (event.getView().getTopInventory().getType() != InventoryType.ANVIL
+                || event.getRawSlot() != 2) return;
+        ItemStack result = event.getCurrentItem();
+        UUID id = items.id(result);
+        if (id == null || repository.byId(id).isEmpty()) return;
+        ItemMeta meta = result.getItemMeta();
+        String name = meta != null && meta.hasDisplayName()
+                ? PlainTextComponentSerializer.plainText().serialize(meta.displayName()) : null;
+        repository.rename(id, name);
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)

@@ -12,16 +12,20 @@ public final class WorldInAJar extends JavaPlugin {
     private PreviewService previews;
     private PortalTransferService transfers;
     private SpectatorService spectators;
+    private TeleportPolicy policy;
+    private JarBackService back;
 
     @Override public void onEnable() {
         saveDefaultConfig();
+        policy = new TeleportPolicy();
         repository = new JarRepository(this); repository.load();
         items = new JarItems(this);
-        interiors = new InteriorService(this); interiors.loadWorld();
+        interiors = new InteriorService(this, policy); interiors.loadWorld();
         itemLore = new JarItemLoreService(this, repository, items, interiors);
         previews = new PreviewService(this, interiors);
-        transfers = new PortalTransferService(this, repository, items, interiors);
-        spectators = new SpectatorService(this, repository, items, interiors, previews);
+        transfers = new PortalTransferService(this, repository, items, interiors, policy);
+        spectators = new SpectatorService(this, repository, items, interiors, previews, policy);
+        back = new JarBackService(this, repository, items, interiors, previews, itemLore);
         // Recipe registrations survive some plugin managers' hot reload cycle. Remove the
         // old key first so enabling is idempotent instead of disabling the whole plugin.
         getServer().removeRecipe(recipeKey());
@@ -30,7 +34,9 @@ public final class WorldInAJar extends JavaPlugin {
         getServer().addRecipe(items.recipe(this));
         getServer().addRecipe(items.portalSideRecipe());
         getServer().getPluginManager().registerEvents(
-                new JarListener(this, repository, items, itemLore, interiors, previews, transfers, spectators), this);
+                new JarListener(this, repository, items, itemLore, interiors, previews, transfers,
+                        spectators, policy), this);
+        getServer().getPluginManager().registerEvents(back, this);
         JarCommand executor = new JarCommand(this);
         PluginCommand command = getCommand("jar");
         if (command == null) throw new IllegalStateException("jar command missing from plugin.yml");
@@ -38,10 +44,12 @@ public final class WorldInAJar extends JavaPlugin {
         previews.start(repository);
         transfers.start();
         spectators.start();
+        back.start();
         getLogger().info("Loaded " + repository.all().size() + " persistent world jar(s).");
     }
 
     @Override public void onDisable() {
+        if (back != null) back.stop();
         if (spectators != null) spectators.stop();
         if (transfers != null) transfers.stop();
         if (previews != null) previews.stop();
@@ -72,4 +80,7 @@ public final class WorldInAJar extends JavaPlugin {
     JarItems items() { return items; }
     InteriorService interiors() { return interiors; }
     SpectatorService spectators() { return spectators; }
+    PortalTransferService transfers() { return transfers; }
+    TeleportPolicy policy() { return policy; }
+    JarBackService back() { return back; }
 }
