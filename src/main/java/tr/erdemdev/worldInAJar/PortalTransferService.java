@@ -6,6 +6,7 @@ import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.block.BlockState;
 import org.bukkit.block.BlockFace;
+import org.bukkit.block.Hopper;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Item;
 import org.bukkit.entity.LivingEntity;
@@ -81,8 +82,11 @@ public final class PortalTransferService {
         if (cursor == null || cursor.getType().isAir() || jar == null || jar.placed() || !jar.hasPortal()) return false;
         if (jar.id().equals(items.id(cursor))) return false;
         if (!interiors.ensureBuilt(jar)) return false;
-        Item inserted = interiors.world().dropItem(insideDestination(jar, null), cursor.clone());
-        inserted.setVelocity(inwardVelocity(jar.door(), 0.18));
+        ItemStack remainder = insertIntoAttachedHoppers(jar, cursor);
+        if (remainder != null) {
+            Item inserted = interiors.world().dropItem(insideDestination(jar, null), remainder);
+            inserted.setVelocity(inwardVelocity(jar.door(), 0.18));
+        }
         return true;
     }
 
@@ -219,10 +223,39 @@ public final class PortalTransferService {
 
     private void transferInside(Entity entity, JarRecord jar) {
         if (!interiors.ensureBuilt(jar)) return;
+        if (entity instanceof Item item) {
+            ItemStack remainder = insertIntoAttachedHoppers(jar, item.getItemStack());
+            if (remainder == null) {
+                item.remove();
+                previousItemLocations.remove(item.getUniqueId());
+                return;
+            }
+            item.setItemStack(remainder);
+        }
         Vector velocity = entity.getVelocity().clone();
         if (!entity.teleport(insideDestination(jar, entity))) return;
         markTransferred(entity);
         entity.setVelocity(velocity);
+    }
+
+    /** Returns the portion that did not fit, or null when attached hoppers accepted everything. */
+    private ItemStack insertIntoAttachedHoppers(JarRecord jar, ItemStack payload) {
+        CellLayout.Cell cell = interiors.cell(jar);
+        int tileX = cell.minX() + jar.doorX() * jar.scale();
+        int tileY = cell.minY() + jar.doorY() * jar.scale();
+        int tileZ = cell.minZ() + jar.doorZ() * jar.scale();
+        ItemStack remainder = payload.clone();
+        for (PortalAttachmentGeometry.BlockPosition position
+                : PortalAttachmentGeometry.touchingInteriorFace(
+                tileX, tileY, tileZ, jar.scale(), jar.door())) {
+            BlockState state = interiors.world().getBlockAt(
+                    position.x(), position.y(), position.z()).getState();
+            if (!(state instanceof Hopper hopper)) continue;
+            Map<Integer, ItemStack> overflow = hopper.getInventory().addItem(remainder);
+            if (overflow.isEmpty()) return null;
+            remainder = overflow.values().iterator().next();
+        }
+        return remainder;
     }
 
     private void transferOutside(Entity entity, JarRecord jar) {
