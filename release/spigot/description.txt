@@ -1,0 +1,43 @@
+[CENTER][SIZE=6][COLOR=#55FFFF][B]WORLD IN A JAR[/B][/COLOR][/SIZE]
+[I]A whole persistent world, small enough to carry.[/I][/CENTER]
+
+[SIZE=5][COLOR=#AA55FF][B]Turn glass into an adventure[/B][/COLOR][/SIZE]
+
+World In A Jar lets players craft glass jars that contain real, persistent, enterable miniature worlds. Place a jar in the outside world and its interior appears inside it as a live miniature scene. Step through its portal to build, survive, store items, and share the space at full size.
+
+[SIZE=5][COLOR=#55FFFF][B]Highlights[/B][/COLOR][/SIZE]
+
+[LIST]
+[*][B]Persistent jar worlds[/B] — every jar keeps its identity, interior, occupants, name, scale, and location when placed, picked up, dropped, or stored.
+[*][B]Two-way live previews[/B] — players outside see the miniature interior; players inside see the surrounding outside world.
+[*][B]Enterable portals[/B] — players, mobs, items, and projectiles can cross between the jar and the real world.
+[*][B]Portable worlds[/B] — pick up a jar without wiping what was built inside. Shift-right-click the item in your inventory to inspect its world.
+[*][B]Modular construction[/B] — sneak-right-click a placed jar with another jar to attach their spaces. Sneak-break one glass cell to detach it again.
+[*][B]Jar recall[/B] — after continuously holding a jar for the configured time, use [B]/jar back[/B] to recover it later.
+[*][B]Named worlds[/B] — rename a jar in an anvil; its name persists in menus, commands, and future item drops.
+[*][B]Isolated interiors[/B] — optional teleport and respawn protection prevents other mechanics or plugins from bypassing jar boundaries.
+[*][B]Performance controls[/B] — previews, chunk snapshots, entity counts, and large interior edits are capped or spread across ticks.
+[/LIST]
+
+[SIZE=5][COLOR=#AA55FF][B]Designed for survival play[/B][/COLOR][/SIZE]
+
+The jar recipe uses seven glass blocks:
+
+[B]Glass — Air — Glass[/B]
+[B]Glass — Air — Glass[/B]
+[B]Glass — Glass — Glass[/B]
+
+The removable [B]Jar Portal Side[/B] uses a 2×2 square of glass panes. Place the jar, right-click its portal face to enter, and right-click the matching interior wall to leave. A blocked portal really is blocked, so doorway placement matters.
+
+[SIZE=5][COLOR=#55FFFF][B]Compatibility[/B][/COLOR][/SIZE]
+
+[LIST]
+[*][B]Server:[/B] Paper 1.21.11
+[*][B]Java:[/B] 21
+[*][B]Required dependencies:[/B] None
+[*][B]Optional dependency:[/B] ProtocolLib 5.4.0 with Minecraft 1.21.11 support, only when using the protocol entity-preview backend
+[/LIST]
+
+[COLOR=#FFAA00][B]Important:[/B][/COLOR] This plugin uses Paper/NMS internals and is built specifically for Minecraft 1.21.11. Other Minecraft versions are not supported by this build.
+
+[CENTER][B]Craft the jar. Build the world. Take it with you.[/B][/CENTER]

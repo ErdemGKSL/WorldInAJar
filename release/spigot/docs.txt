@@ -1,0 +1,182 @@
+[CENTER][SIZE=6][COLOR=#55FFFF][B]WORLD IN A JAR — DOCUMENTATION[/B][/COLOR][/SIZE][/CENTER]
+
+[SIZE=5][COLOR=#AA55FF][B]Requirements and installation[/B][/COLOR][/SIZE]
+
+[LIST=1]
+[*]Run [B]Paper 1.21.11[/B] with [B]Java 21[/B].
+[*]Stop the server.
+[*]Place the World In A Jar plugin file in the server's [B]plugins[/B] folder.
+[*]Optional: install ProtocolLib 5.4.0 with Minecraft 1.21.11 support if you intend to select the [B]protocol[/B] entity-preview backend.
+[*]Start the server. The plugin creates [B]plugins/WorldInAJar/config.yml[/B], [B]plugins/WorldInAJar/jars.yml[/B], and the configured interior world.
+[/LIST]
+
+[COLOR=#FFAA00][B]Do not manually edit jars.yml while the server is running.[/B][/COLOR] It is the persistent registry that connects each physical jar item or block assembly to its interior cell.
+
+[SIZE=5][COLOR=#55FFFF][B]Quick start[/B][/COLOR][/SIZE]
+
+[B]1. Craft a World Jar[/B]
+
+Use seven glass blocks:
+
+[B]Glass — Air — Glass[/B]
+[B]Glass — Air — Glass[/B]
+[B]Glass — Glass — Glass[/B]
+
+Players with [B]worldinajar.create[/B] may also use [B]/jar create[/B].
+
+[B]2. Place and enter it[/B]
+
+Place the jar like a normal block. Its initial portal is the horizontal side facing the player. Right-click that face to enter. Right-click the corresponding boundary wall from inside to leave, or use [B]/jar exit[/B].
+
+[B]3. Build inside[/B]
+
+The default interior is 32 blocks along each edge. Changes persist when the jar is picked up, moved, dropped, stored, or attached to another jar.
+
+[B]4. Pick it up[/B]
+
+Break any exterior glass block normally to pick up the complete jar assembly. The item lore shows its footprint and current occupants. Jar items are intentionally unstackable.
+
+[SIZE=5][COLOR=#AA55FF][B]Player interactions[/B][/COLOR][/SIZE]
+
+[LIST]
+[*][B]Right-click the portal face:[/B] enter a placed jar.
+[*][B]Right-click the matching wall inside:[/B] exit the jar.
+[*][B]Shift-right-click a jar in your player inventory:[/B] inspect its interior in spectator mode. Sneak to return.
+[*][B]Rename in an anvil:[/B] persist a friendly jar name.
+[*][B]Sneak-right-click a placed jar while holding another jar:[/B] attach the held jar on the clicked face.
+[*][B]Sneak-break one cell of a combined jar:[/B] detach that part as its own jar item.
+[*][B]Sneak-right-click an installed portal with an empty hand:[/B] remove and return the portal-side item.
+[*][B]Right-click an exposed horizontal jar face with a Jar Portal Side:[/B] install the portal there.
+[*][B]Click a carried jar with an item on the inventory cursor:[/B] send that item into the jar. A hopper touching the inside of the portal receives it first; otherwise it drops inside.
+[/LIST]
+
+The [B]Jar Portal Side[/B] recipe is a 2×2 square of glass panes. A jar can have one installed portal. Portals must be on exposed faces.
+
+[SIZE=5][COLOR=#55FFFF][B]Combining jars[/B][/COLOR][/SIZE]
+
+Attached jars form a multi-cell exterior assembly and one connected interior. Existing interiors are copied into their matching positions instead of being reset.
+
+[LIST]
+[*]The destination space outside must be empty.
+[*]Both existing jars must have the same scale.
+[*]The result must stay within [B]jar.max-combined-size[/B] and the configured interior allocation limits.
+[*]If both source and target have portals, the target portal is retained and the unused portal-side item is returned.
+[*]Combination and detachment edits are prepared in the background and applied through a per-tick block budget. Wait for the completion message before moving the affected jar.
+[/LIST]
+
+[SIZE=5][COLOR=#AA55FF][B]Portable jar behavior[/B][/COLOR][/SIZE]
+
+A carried jar remains a real place:
+
+[LIST]
+[*]Players already inside remain associated with that jar.
+[*]Using the inside exit wall while the jar is carried starts spectator inspection of the carrier's surroundings when available.
+[*]Items and entities leaving a carried jar return near the player, dropped item, or container currently holding it.
+[*]Jar items can be stored in inventories and containers or dropped into the world without losing the interior.
+[/LIST]
+
+[SIZE=5][COLOR=#55FFFF][B]Jar recall[/B][/COLOR][/SIZE]
+
+The plugin records a jar's last holder after that player continuously keeps it in their inventory for [B]jar.last-holder-minutes[/B] (five minutes by default). [B]/jar back[/B] opens a menu of remembered jars.
+
+Choosing one recalls the actual jar into the player's inventory. If it is placed, its exterior glass is removed. If it is loose, existing loaded copies are removed before the jar is returned. This is recovery, not duplication.
+
+[SIZE=5][COLOR=#AA55FF][B]Commands[/B][/COLOR][/SIZE]
+
+[LIST]
+[*][B]/jar create[/B] — create a blank World Jar item. Player only.
+[*][B]/jar give &lt;player&gt;[/B] — give a blank World Jar to an online player.
+[*][B]/jar list[/B] — list all persistent jars with owner, state, location, cell, scale, size, parts, and portal data.
+[*][B]/jar reload[/B] — reload configuration and persistent jar records.
+[*][B]/jar exit[/B] — leave the current jar or end jar spectator inspection.
+[*][B]/jar back[/B] — open the last-holder recovery menu.
+[*][B]/jar admin info[/B] — show details about the jar you are currently inside.
+[*][B]/jar admin enter &lt;jar id or name&gt;[/B] — force-enter a jar by UUID or persistent anvil name.
+[*][B]/jar admin exit[/B] — force-exit the interior world.
+[/LIST]
+
+Aliases for [B]/jar[/B] are [B]/worldinajar[/B] and [B]/wiaj[/B].
+
+[SIZE=5][COLOR=#55FFFF][B]Permissions[/B][/COLOR][/SIZE]
+
+[LIST]
+[*][B]worldinajar.enter[/B] — enter placed jars and inspect carried jar items. Default: everyone.
+[*][B]worldinajar.exit[/B] — use [B]/jar exit[/B]. Default: everyone.
+[*][B]worldinajar.back[/B] — use [B]/jar back[/B]. Default: everyone.
+[*][B]worldinajar.create[/B] — use [B]/jar create[/B]. Default: everyone.
+[*][B]worldinajar.give[/B] — use [B]/jar give[/B]. Default: operators.
+[*][B]worldinajar.list[/B] — use [B]/jar list[/B]. Default: operators.
+[*][B]worldinajar.reload[/B] — use [B]/jar reload[/B]. Default: operators.
+[*][B]worldinajar.admin[/B] — use administrative jar commands. It also grants give, list, and reload. Default: operators.
+[/LIST]
+
+[SIZE=5][COLOR=#AA55FF][B]Configuration reference[/B][/COLOR][/SIZE]
+
+[B]Entity previews[/B]
+
+[LIST]
+[*][B]entity-preview[/B] — [B]manequeen[/B] uses the built-in packet backend. [B]mannequin[/B] is accepted as an alias. [B]protocol[/B] requires ProtocolLib compatible with 1.21.11.
+[/LIST]
+
+[B]Jar sizing and recovery[/B]
+
+[LIST]
+[*][B]jar.scale[/B] — edge length, in interior blocks, assigned to newly created jars. Existing jars retain their original scale. Valid item scale is clamped from 16 through 256.
+[*][B]jar.max-combined-size[/B] — maximum exterior width, height, or depth of a combined assembly.
+[*][B]jar.last-holder-minutes[/B] — continuous inventory holding time before a player becomes the jar's recall holder.
+[/LIST]
+
+[B]Isolation[/B]
+
+[LIST]
+[*][B]isolation.teleports[/B] — blocks external teleports across the inside/outside boundary. Outside-to-inside destinations are redirected to the real jar; inside-to-outside teleports are cancelled. Plugin portals, inspection, and admin moves are allowed.
+[*][B]isolation.respawns[/B] — keeps deaths and bed respawn points inside their jar. Beds save a per-jar respawn point.
+[/LIST]
+
+[B]Interior world[/B]
+
+[LIST]
+[*][B]interior.world[/B] — name of the shared flat interior world.
+[*][B]interior.base-y[/B] — base height used for allocated cells.
+[*][B]interior.cell-gap[/B] — unused spacing between interior cells.
+[*][B]interior.allocation-stride[/B] — fixed spacing reserved for every cell. Keep it at least [B]jar.scale × jar.max-combined-size[/B].
+[*][B]interior.mob-spawning[/B] — enables or disables mob spawning in the interior world.
+[*][B]interior.combination-blocks-per-tick[/B] — block-operation ceiling for combination jobs each tick.
+[*][B]interior.combination-max-millis-per-tick[/B] — time ceiling for combination jobs each tick.
+[/LIST]
+
+[B]Preview timing and limits[/B]
+
+[LIST]
+[*][B]preview.update-ticks[/B] — interval for viewer visibility and full entity reconciliation. Movement is still synchronized every tick.
+[*][B]preview.block-update-ticks[/B] — delay for event-driven block preview refreshes.
+[*][B]preview.block-refresh-ticks[/B] — slower fingerprint scan for changes not covered by block events.
+[*][B]preview.exterior.enabled[/B] — show jar interiors to outside viewers.
+[*][B]preview.exterior.viewer-distance[/B] — outside viewing range.
+[*][B]preview.exterior.max-blocks[/B], [B]max-player-markers[/B], [B]max-entities[/B] — exterior scene caps per jar.
+[*][B]preview.interior.enabled[/B] — show the outside world to jar occupants.
+[*][B]preview.interior.outside-radius[/B] — three-dimensional radius sampled around the real jar.
+[*][B]preview.interior.max-blocks[/B], [B]max-player-markers[/B], [B]max-entities[/B] — interior viewer scene caps.
+[*][B]preview.interior.show-players[/B] — show nearby outside players as viewer-specific virtual mannequins.
+[/LIST]
+
+Use [B]/jar reload[/B] after editing configuration. Teleport and respawn isolation are read live after reload. Structural sizing changes apply safely to newly created jars; existing jars retain their stored scale.
+
+[SIZE=5][COLOR=#55FFFF][B]Persistence, backups, and updates[/B][/COLOR][/SIZE]
+
+[LIST]
+[*]Back up [B]plugins/WorldInAJar/jars.yml[/B] and the configured interior world together while the server is stopped.
+[*]Do not delete or regenerate only one of those two pieces; the registry's cell indexes identify where each jar interior lives.
+[*]Do not rename the interior world without updating [B]interior.world[/B].
+[*]Because this build uses Minecraft server internals, use it only on the exact supported Paper/Minecraft version.
+[/LIST]
+
+[SIZE=5][COLOR=#AA55FF][B]Operational notes[/B][/COLOR][/SIZE]
+
+[LIST]
+[*]The jar's glass boundary inside cannot be broken.
+[*]A portal cannot be used when its doorway is obstructed.
+[*]Preview caps affect display-only scenery; they do not replace or erase real interior blocks.
+[*]The built-in preview backend requires no dependency. Select the ProtocolLib backend only when a compatible ProtocolLib build is installed.
+[*]The interior world is managed by the plugin. Avoid treating it like a normal public world or teleporting players into its allocated cells.
+[/LIST]
