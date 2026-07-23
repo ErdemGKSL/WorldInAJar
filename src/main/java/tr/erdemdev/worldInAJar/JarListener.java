@@ -344,6 +344,7 @@ public final class JarListener implements Listener {
      */
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onBoundaryTeleport(PlayerTeleportEvent event) {
+        if (!plugin.getConfig().getBoolean("isolation.teleports", true)) return;
         boolean fromInside = event.getFrom().getWorld() == interiors.world();
         boolean toInside = event.getTo().getWorld() == interiors.world();
         if (fromInside == toInside || policy.isPermitted(event.getPlayer())) return;
@@ -404,7 +405,7 @@ public final class JarListener implements Listener {
     @EventHandler(priority = EventPriority.HIGH)
     public void onRespawnInsideJar(PlayerRespawnEvent event) {
         UUID jarId = deathJars.remove(event.getPlayer().getUniqueId());
-        if (jarId == null) return;
+        if (jarId == null || !plugin.getConfig().getBoolean("isolation.respawns", true)) return;
         JarRecord jar = repository.byId(jarId).orElse(null);
         if (jar == null) return;
         interiors.ensureBuilt(jar);
@@ -421,6 +422,7 @@ public final class JarListener implements Listener {
      */
     @EventHandler(priority = EventPriority.LOW)
     public void onBedInsideJar(PlayerInteractEvent event) {
+        if (!plugin.getConfig().getBoolean("isolation.respawns", true)) return;
         if (event.getAction() != Action.RIGHT_CLICK_BLOCK || event.getHand() != EquipmentSlot.HAND) return;
         Block block = event.getClickedBlock();
         if (block == null || block.getWorld() != interiors.world()

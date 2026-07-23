@@ -16,6 +16,18 @@ jar:
   # its "last holder", allowing them to recall it later with /jar back.
   last-holder-minutes: 5
 
+# Isolation of jar interiors from the real world. Changes apply on /jar reload.
+isolation:
+  # Block external teleports (commands, other plugins, ender pearls, spectating) from crossing
+  # between jar interiors and the outside world. Outside->inside teleports are redirected to the
+  # jar's real-world location instead; inside->outside teleports are cancelled. Plugin-driven
+  # movement (portals, spectating via jar items, /jar admin commands) is never affected.
+  teleports: true
+  # Deaths inside a jar respawn inside that jar, and right-clicking a bed inside a jar saves a
+  # per-jar respawn point instead of setting a vanilla spawn. When disabled, vanilla respawn
+  # rules apply everywhere.
+  respawns: true
+
 interior:
   world: world_in_a_jar
   base-y: 64
