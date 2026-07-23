@@ -347,7 +347,18 @@ public final class JarListener implements Listener {
         if (!plugin.getConfig().getBoolean("isolation.teleports", true)) return;
         boolean fromInside = event.getFrom().getWorld() == interiors.world();
         boolean toInside = event.getTo().getWorld() == interiors.world();
-        if (fromInside == toInside || policy.isPermitted(event.getPlayer())) return;
+        if (!fromInside && !toInside) return;
+        if (policy.isPermitted(event.getPlayer())) return;
+        if (fromInside && toInside) {
+            JarRecord fromJar = jarAt(event.getFrom());
+            JarRecord toJar = jarAt(event.getTo());
+            UUID fromId = fromJar == null ? null : fromJar.id();
+            UUID toId = toJar == null ? null : toJar.id();
+            if (Objects.equals(fromId, toId)) return;
+            event.setCancelled(true);
+            event.getPlayer().sendMessage("§cYou cannot teleport from one jar into another.");
+            return;
+        }
         if (fromInside) {
             event.setCancelled(true);
             event.getPlayer().sendMessage("§cYou cannot teleport out of a jar.");

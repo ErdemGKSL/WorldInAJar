@@ -904,7 +904,9 @@ public final class InteriorService {
                     destinationCell.minX() + offsetX - sourceCell.minX(),
                     destinationCell.minY() + offsetY - sourceCell.minY(),
                     destinationCell.minZ() + offsetZ - sourceCell.minZ());
-            if (entity.teleport(moved) && entity instanceof Player player) {
+            boolean success = entity instanceof Player player
+                    ? policy.teleport(player, moved) : entity.teleport(moved);
+            if (success && entity instanceof Player player) {
                 sessions.put(player.getUniqueId(), target.id());
                 applyEnvironment(player, target);
             }
