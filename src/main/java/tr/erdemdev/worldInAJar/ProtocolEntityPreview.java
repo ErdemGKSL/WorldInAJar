@@ -11,6 +11,8 @@ import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.game.ClientGamePacketListener;
 import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundDamageEventPacket;
+import net.minecraft.network.protocol.game.ClientboundEntityPositionSyncPacket;
+import net.minecraft.network.protocol.game.ClientboundMoveEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundProjectilePowerPacket;
 import net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket;
 import net.minecraft.network.protocol.game.ClientboundRotateHeadPacket;
@@ -21,8 +23,8 @@ import net.minecraft.network.protocol.game.ClientboundSetEquipmentPacket;
 import net.minecraft.network.protocol.game.ClientboundSetPassengersPacket;
 import net.minecraft.network.protocol.game.ClientboundSetPlayerTeamPacket;
 import net.minecraft.network.protocol.game.ClientboundTakeItemEntityPacket;
-import net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundUpdateAttributesPacket;
+import net.minecraft.network.protocol.game.VecDeltaCodec;
 import net.minecraft.server.level.ChunkMap;
 import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
@@ -30,7 +32,6 @@ import net.minecraft.util.Mth;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.PositionMoveRotation;
-import net.minecraft.world.entity.Relative;
 import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.projectile.FishingHook;
@@ -70,6 +71,11 @@ import java.util.concurrent.ConcurrentHashMap;
 /** Same-type, client-only entity mirrors transmitted through ProtocolLib. */
 final class ProtocolEntityPreview implements EntityPreviewBackend {
     private static final AtomicInteger IDS = new AtomicInteger(1_900_000_000);
+    // Mirrors vanilla ServerEntity's own thresholds for switching between relative move deltas and
+    // a full position resync, so mirrored movement looks like normal entity tracking to the client.
+    private static final int FORCED_POS_UPDATE_PERIOD = 60;
+    private static final int FORCED_TELEPORT_PERIOD = 400;
+    private static final double POSITION_TOLERANCE = 7.6293945E-6;
     private static final Set<PacketType> RELATIONSHIP_PACKETS = Set.of(
             PacketType.Play.Server.ATTACH_ENTITY, PacketType.Play.Server.MOUNT);
     private final JavaPlugin plugin;
@@ -421,11 +427,6 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
                 result.add(new SynchedEntityData.DataValue<>(customNameId,
                         EntityDataSerializers.OPTIONAL_COMPONENT,
                         Optional.<net.minecraft.network.chat.Component>empty()));
-            } else if (value.id() == 0 && value.serializer() == EntityDataSerializers.BYTE) {
-                // Sprinting mirrors spawn full-size block-crumb particles under the scaled model
-                // every tick, so the sprint bit of the shared flags is never forwarded.
-                result.add(new SynchedEntityData.DataValue<>(0, EntityDataSerializers.BYTE,
-                        (byte) ((Byte) value.value() & ~0x08)));
             } else {
                 result.add(value);
             }
@@ -532,6 +533,15 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
         private int sourceEntityId;
         private UUID sourceWorldId;
         private MovementSnapshot lastMovement;
+        // Tracks what the client was last told, exactly like vanilla's ServerEntity, so continuous
+        // movement can be sent as small relative deltas instead of repeated absolute teleports.
+        private final VecDeltaCodec positionCodec = new VecDeltaCodec();
+        private byte lastSentYRot;
+        private byte lastSentXRot;
+        private boolean wasOnGround;
+        private boolean positionSynced;
+        private int syncTickCount;
+        private int teleportDelay;
 
         private Mirror(MirrorKey key, Entity source) {
             this.key = key;
@@ -604,10 +614,18 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
                     packets.add(PacketContainer.fromPacket(
                             ClientboundSetPlayerTeamPacket.createAddOrModifyPacket(hiddenNameTeam, true)));
                 }
+                Vec3 spawnPosition = new Vec3(state.mapping.x(state.sourceX), state.mapping.y(state.sourceY),
+                        state.mapping.z(state.sourceZ));
                 packets.add(PacketContainer.fromPacket(new ClientboundAddEntityPacket(id, uuid,
-                        state.mapping.x(state.sourceX), state.mapping.y(state.sourceY),
-                        state.mapping.z(state.sourceZ), state.pitch, state.yaw, state.type, state.data,
-                        state.velocity.scale(state.worldScale), state.headYaw)));
+                        spawnPosition.x, spawnPosition.y, spawnPosition.z, state.pitch, state.yaw, state.type,
+                        state.data, state.velocity.scale(state.worldScale), state.headYaw)));
+                positionCodec.setBase(spawnPosition);
+                lastSentYRot = Mth.packDegrees(state.yaw);
+                lastSentXRot = Mth.packDegrees(state.pitch);
+                wasOnGround = false;
+                teleportDelay = 0;
+                syncTickCount = 0;
+                positionSynced = true;
                 sendNow(List.of(viewer), packets);
             });
             return true;
@@ -700,16 +718,65 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
             sendNow(delivery.viewers, packets);
         }
 
+        /** Chooses between relative move deltas and a full position resync exactly like vanilla's
+         *  ServerEntity#sendChanges(): a full ClientboundTeleportEntityPacket every tick (the previous
+         *  approach here) is not how vanilla ever streams continuous movement, and clients apparently
+         *  don't feed it into the same interpolation/animation state that walking normally drives, so
+         *  mirrored entities never registered as moving for limb-swing purposes and rotation looked
+         *  unstable. */
         private List<PacketContainer> movementPackets(MovementState state) {
+            Vec3 target = new Vec3(state.mapping.x(state.sourceX), state.mapping.y(state.sourceY),
+                    state.mapping.z(state.sourceZ));
             Vec3 velocity = state.velocity.scale(state.worldScale);
+            byte yRot = Mth.packDegrees(state.yaw);
+            byte xRot = Mth.packDegrees(state.pitch);
+            if (!positionSynced) {
+                positionCodec.setBase(target);
+                lastSentYRot = yRot;
+                lastSentXRot = xRot;
+                wasOnGround = state.onGround;
+                positionSynced = true;
+            }
+            boolean rotationChanged = Math.abs(yRot - lastSentYRot) >= 1 || Math.abs(xRot - lastSentXRot) >= 1;
+
             List<PacketContainer> packets = new ArrayList<>(3);
-            packets.add(PacketContainer.fromPacket(ClientboundTeleportEntityPacket.teleport(id,
-                    new PositionMoveRotation(new Vec3(state.mapping.x(state.sourceX),
-                            state.mapping.y(state.sourceY), state.mapping.z(state.sourceZ)), velocity,
-                            state.yaw, state.pitch), Set.<Relative>of(), state.onGround)));
+            teleportDelay++;
+            long dx = positionCodec.encodeX(target);
+            long dy = positionCodec.encodeY(target);
+            long dz = positionCodec.encodeZ(target);
+            boolean outOfShortRange = dx < -32768L || dx > 32767L || dy < -32768L || dy > 32767L
+                    || dz < -32768L || dz > 32767L;
+            if (outOfShortRange || teleportDelay > FORCED_TELEPORT_PERIOD || wasOnGround != state.onGround) {
+                packets.add(PacketContainer.fromPacket(new ClientboundEntityPositionSyncPacket(id,
+                        new PositionMoveRotation(target, velocity, state.yaw, state.pitch), state.onGround)));
+                positionCodec.setBase(target);
+                lastSentYRot = yRot;
+                lastSentXRot = xRot;
+                wasOnGround = state.onGround;
+                teleportDelay = 0;
+            } else {
+                boolean moved = positionCodec.delta(target).lengthSqr() >= POSITION_TOLERANCE;
+                boolean sendPos = moved || syncTickCount % FORCED_POS_UPDATE_PERIOD == 0;
+                if (sendPos && rotationChanged) {
+                    packets.add(PacketContainer.fromPacket(new ClientboundMoveEntityPacket.PosRot(
+                            id, (short) dx, (short) dy, (short) dz, yRot, xRot, state.onGround)));
+                } else if (sendPos) {
+                    packets.add(PacketContainer.fromPacket(new ClientboundMoveEntityPacket.Pos(
+                            id, (short) dx, (short) dy, (short) dz, state.onGround)));
+                } else if (rotationChanged) {
+                    packets.add(PacketContainer.fromPacket(new ClientboundMoveEntityPacket.Rot(
+                            id, yRot, xRot, state.onGround)));
+                }
+                if (sendPos) positionCodec.setBase(target);
+                if (rotationChanged) {
+                    lastSentYRot = yRot;
+                    lastSentXRot = xRot;
+                }
+            }
+            syncTickCount++;
             packets.add(state.headRotation);
             // Clients ignore explicit velocity for remote living entities but extrapolate items and
-            // projectiles with it; sending it to living mirrors only fights teleport interpolation.
+            // projectiles with it; sending it to living mirrors only fights the movement interpolation.
             if (!state.living) {
                 packets.add(PacketContainer.fromPacket(new ClientboundSetEntityMotionPacket(id, velocity)));
             }

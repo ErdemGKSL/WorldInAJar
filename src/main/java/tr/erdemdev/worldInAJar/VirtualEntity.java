@@ -281,9 +281,7 @@ final class VirtualMannequin extends VirtualEntity {
 
         mannequin.setSharedFlagOnFire(source.isOnFire());
         mannequin.setShiftKeyDown(source.isShiftKeyDown());
-        // A sprinting flag makes the client spawn full-size block-crumb particles under the
-        // scaled model every tick, so it is never mirrored.
-        mannequin.setSprinting(false);
+        mannequin.setSprinting(source.isSprinting());
         mannequin.setSwimming(source.isSwimming());
         mannequin.setInvisible(source.isInvisible());
         mannequin.setGlowingTag(source.hasGlowingTag());
