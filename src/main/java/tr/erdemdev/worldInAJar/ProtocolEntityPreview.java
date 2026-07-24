@@ -190,9 +190,7 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
         for (MirrorUpdate update : updates) {
             update.mirror.spawnFor(update.source, update.sourceLocation, update.mapping, viewers);
         }
-        for (MirrorUpdate update : updates) {
-            update.mirror.syncFor(update.source, update.sourceLocation, update.mapping, viewers);
-        }
+        for (MirrorUpdate update : updates) update.mirror.syncFor(update.source, viewers);
     }
 
     private static int spawnPriority(Entity source) {
@@ -578,16 +576,14 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
             }
         }
 
-        private void syncFor(Entity source, Location sourceLocation, CoordinateMapping mapping,
-                             Collection<Player> desired) {
+        private void syncFor(Entity source, Collection<Player> desired) {
             List<Player> active = new ArrayList<>(desired.size());
             for (Player viewer : desired) {
                 if (!viewers.contains(viewer.getUniqueId())) continue;
                 active.add(viewer);
                 syncRelationships(source, List.of(viewer));
             }
-            if (!active.isEmpty()) queueState(active,
-                    snapshotState(source, sourceLocation, mapping, worldScale));
+            if (!active.isEmpty()) queueState(active, snapshotState(source, worldScale));
         }
 
         private boolean spawn(Player viewer, Entity source, Location sourceLocation,
@@ -644,8 +640,7 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
             ProtocolEntityPreview.this.unregisterSource(sourceKey());
         }
 
-        private EntityState snapshotState(Entity source, Location sourceLocation,
-                                          CoordinateMapping mapping, double scale) {
+        private EntityState snapshotState(Entity source, double scale) {
             net.minecraft.world.entity.Entity handle = ((CraftEntity) source).getHandle();
             Packet<ClientGamePacketListener> attributesPacket = null;
             List<Pair<EquipmentSlot, ItemStack>> equipment = List.of();
@@ -659,8 +654,7 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
                 equipment = equipment(living);
             }
             return new EntityState(hiddenNametagMetadata(handle, handle.getEntityData().packAll()),
-                    movementState(handle, sourceLocation, mapping, scale),
-                    attributesPacket, equipment, sourceScale, supportsAttributes);
+                    scale, attributesPacket, equipment, sourceScale, supportsAttributes);
         }
 
         private MovementState movementState(net.minecraft.world.entity.Entity handle,
@@ -686,14 +680,18 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
         }
 
         private void sendStateNow(StateDelivery delivery) {
+            // Position and rotation are deliberately not sent here: tickMovement() already streams
+            // them every server tick, and resending them at the slower state-sync cadence raced with
+            // that stream, resetting the client's rotation interpolation and making head/body turns
+            // look jittery.
             EntityState state = delivery.state;
-            List<PacketContainer> packets = movementPackets(state.movement);
-            packets.addFirst(PacketContainer.fromPacket(new ClientboundSetEntityDataPacket(id, state.metadata)));
+            List<PacketContainer> packets = new ArrayList<>(3);
+            packets.add(PacketContainer.fromPacket(new ClientboundSetEntityDataPacket(id, state.metadata)));
             if (state.attributes != null) packets.add(PacketContainer.fromPacket(state.attributes));
             if (state.supportsAttributes) {
                 AttributeInstance scaled = new AttributeInstance(Attributes.SCALE, ignored -> {});
                 scaled.setBaseValue(Math.max(.0625, Math.min(16.0,
-                        state.sourceScale * state.movement.worldScale)));
+                        state.sourceScale * state.worldScale)));
                 packets.add(PacketContainer.fromPacket(new ClientboundUpdateAttributesPacket(id, List.of(scaled))));
             }
             if (!state.equipment.isEmpty()) {
@@ -898,7 +896,7 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
                                  PacketContainer headRotation, double worldScale, boolean living) {}
     private record MovementSnapshot(double x, double y, double z, float yaw, float pitch,
                                     float headYaw, boolean onGround) {}
-    private record EntityState(List<SynchedEntityData.DataValue<?>> metadata, MovementState movement,
+    private record EntityState(List<SynchedEntityData.DataValue<?>> metadata, double worldScale,
                                Packet<ClientGamePacketListener> attributes,
                                List<Pair<EquipmentSlot, ItemStack>> equipment,
                                double sourceScale, boolean supportsAttributes) {}

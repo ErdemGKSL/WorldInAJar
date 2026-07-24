@@ -248,13 +248,11 @@ public final class PortalTransferService {
     /** Returns the portion that did not fit, or null when attached hoppers accepted everything. */
     private ItemStack insertIntoAttachedHoppers(JarRecord jar, ItemStack payload) {
         CellLayout.Cell cell = interiors.cell(jar);
-        int tileX = cell.minX() + jar.doorX() * jar.scale();
-        int tileY = cell.minY() + jar.doorY() * jar.scale();
-        int tileZ = cell.minZ() + jar.doorZ() * jar.scale();
+        JarAssembly.Cell doorCell = new JarAssembly.Cell(jar.doorX(), jar.doorY(), jar.doorZ());
         ItemStack remainder = payload.clone();
         for (PortalAttachmentGeometry.BlockPosition position
-                : PortalAttachmentGeometry.touchingInteriorFace(
-                tileX, tileY, tileZ, jar.scale(), jar.door())) {
+                : PortalAttachmentGeometry.touchingInteriorFace(jar.assembly(), doorCell,
+                cell.minX(), cell.minY(), cell.minZ(), jar.scale(), jar.door())) {
             BlockState state = interiors.world().getBlockAt(
                     position.x(), position.y(), position.z()).getState();
             if (!(state instanceof Hopper hopper)) continue;
