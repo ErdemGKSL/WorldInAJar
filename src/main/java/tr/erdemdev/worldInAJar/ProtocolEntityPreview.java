@@ -232,8 +232,11 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
     }
 
     private boolean eligible(Entity entity) {
+        // Item frames have a fixed, unscalable size, so mirroring them into a scaled jar view
+        // would show them at the wrong size relative to everything else.
         return entity.isValid() && !(entity instanceof Display) && !(entity instanceof Mannequin)
-                && !(entity instanceof org.bukkit.entity.Item);
+                && !(entity instanceof org.bukkit.entity.Item)
+                && !(entity instanceof org.bukkit.entity.ItemFrame);
     }
 
     private Location mapped(JarRecord jar, Side side, Location source) {
@@ -402,14 +405,16 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
             net.minecraft.world.entity.Entity handle = ((CraftEntity) source).getHandle();
             List<Player> viewers = List.copyOf(online(mirror.viewers));
             if (!viewers.isEmpty()) targets.add(new MetadataRelayTarget(mirror.id,
-                    List.copyOf(hiddenNametagMetadata(handle, original.packedItems())), viewers));
+                    List.copyOf(hiddenNametagMetadata(handle, original.packedItems(),
+                            mirror.key.side == Side.EXTERIOR)), viewers));
         }
         dispatch(() -> targets.forEach(target -> sendNow(target.viewers, List.of(PacketContainer.fromPacket(
                 new ClientboundSetEntityDataPacket(target.entityId, target.metadata))))));
     }
 
     private static List<SynchedEntityData.DataValue<?>> hiddenNametagMetadata(
-            net.minecraft.world.entity.Entity handle, List<SynchedEntityData.DataValue<?>> values) {
+            net.minecraft.world.entity.Entity handle, List<SynchedEntityData.DataValue<?>> values,
+            boolean stripSprint) {
         List<SynchedEntityData.DataValue<?>> allValues = handle.getEntityData().packAll();
         int visibilityId = allValues.stream()
                 .filter(value -> value.serializer() == EntityDataSerializers.BOOLEAN)
@@ -427,6 +432,15 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
                 result.add(new SynchedEntityData.DataValue<>(customNameId,
                         EntityDataSerializers.OPTIONAL_COMPONENT,
                         Optional.<net.minecraft.network.chat.Component>empty()));
+            } else if (stripSprint && value.id() == 0 && value.serializer() == EntityDataSerializers.BYTE) {
+                // Sprinting mini mirrors (interior occupants shown outside) spawn sprint dust
+                // particles sized for a full-scale player, which look absurd under the shrunk
+                // model; the block directly below them is usually the jar itself, so faking that
+                // block invisible to suppress the particle risks flickering the jar away instead.
+                // Mirrors shown at giant scale (outside players seen from inside) keep the flag,
+                // since a real interior floor tile is a safe thing to have particles land on.
+                result.add(new SynchedEntityData.DataValue<>(0, EntityDataSerializers.BYTE,
+                        (byte) ((Byte) value.value() & ~0x08)));
             } else {
                 result.add(value);
             }
@@ -671,8 +685,8 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
                 sourceScale = living.getScale();
                 equipment = equipment(living);
             }
-            return new EntityState(hiddenNametagMetadata(handle, handle.getEntityData().packAll()),
-                    scale, attributesPacket, equipment, sourceScale, supportsAttributes);
+            return new EntityState(hiddenNametagMetadata(handle, handle.getEntityData().packAll(),
+                    key.side == Side.EXTERIOR), scale, attributesPacket, equipment, sourceScale, supportsAttributes);
         }
 
         private MovementState movementState(net.minecraft.world.entity.Entity handle,

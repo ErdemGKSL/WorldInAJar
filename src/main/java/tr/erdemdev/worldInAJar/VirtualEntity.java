@@ -281,7 +281,12 @@ final class VirtualMannequin extends VirtualEntity {
 
         mannequin.setSharedFlagOnFire(source.isOnFire());
         mannequin.setShiftKeyDown(source.isShiftKeyDown());
-        mannequin.setSprinting(source.isSprinting());
+        // Sprinting mini mirrors (interior occupants shown outside, movementScale < 1) spawn sprint
+        // dust particles sized for a full-scale player; the block directly below them is usually the
+        // jar itself, so faking that block invisible to suppress the particle risks flickering the
+        // jar away instead. Giant mirrors (outside players seen from inside) keep the flag, since a
+        // real interior floor tile is a safe thing to have particles land on.
+        mannequin.setSprinting(movementScale >= 1f && source.isSprinting());
         mannequin.setSwimming(source.isSwimming());
         mannequin.setInvisible(source.isInvisible());
         mannequin.setGlowingTag(source.hasGlowingTag());
