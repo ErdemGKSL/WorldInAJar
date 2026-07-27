@@ -1,0 +1,18 @@
+# World In A Jar 1.2.1
+
+World In A Jar 1.2.1 adds ProtocolLib entity previews to every supported 26.x runtime adapter.
+
+## Highlights
+
+- Added ProtocolLib entity-preview support for Minecraft 26.1, 26.1.1, 26.1.2, and 26.2.
+- The single JAR now selects an isolated ProtocolLib preview backend for each supported 26.x
+  server version.
+- Updated configuration and marketplace documentation to describe ProtocolLib support across all
+  supported server versions.
+
+## Requirements
+
+- Paper 1.21.11, 26.1, 26.1.1, 26.1.2, or 26.2
+- Java 25
+
+ProtocolLib remains optional and is required only when `entity-preview` is set to `protocol`.
