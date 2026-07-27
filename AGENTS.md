@@ -38,7 +38,7 @@ Service layer (each a field of the plugin main):
 
 Entity previews are pluggable behind `EntityPreviewBackend` (selected by `entity-preview` in config.yml): the built-in mannequin backend uses `VirtualEntity` subclasses (client-side-only entities sent as raw packets, never registered with a world), while `ProtocolEntityPreview` mirrors real interior entities to outside viewers via ProtocolLib packet interception and NMS packets.
 
-Pure geometry is deliberately separated from Bukkit state so it can be unit-tested and run off the server thread: `JarAssembly`/`JarPart` (validated multi-cell shapes), `CombinationPlanner` (attaching one jar assembly to another — explicitly documented as safe off-thread), `InteriorBoundary` (which interior blocks are barrier walls), `DoorwayCollision` (whether outside blocks seal a portal), `CellLayout`, and `ProtocolPreviewMath`. Keep new logic in this pure layer when it doesn't need live server state.
+Pure geometry is deliberately separated from Bukkit state so it can be unit-tested and run off the server thread: `JarAssembly`/`JarPart` (validated multi-cell shapes), `CombinationPlanner` (attaching one jar assembly to another — explicitly documented as safe off-thread), `InteriorBoundary` (which interior blocks are barrier walls), `DoorwayCollision` (whether outside blocks seal a portal), `CellLayout`, `PreviewOcclusion` (which outside blocks an occupant can see out of a jar), and `ProtocolPreviewMath`. Keep new logic in this pure layer when it doesn't need live server state.
 
 ## Conventions
 

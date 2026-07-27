@@ -30,6 +30,8 @@ public final class PreviewService {
     private static final int INTERIOR_BLOCKS = 2;
     private static final int CHUNK_SNAPSHOTS_PER_TICK = 4;
     private static final int CHUNK_TICKET_LOADS_PER_TICK = 4;
+    private static final int OCCLUSION_CACHE_ENTRIES = 64;
+    private static final long OCCLUSION_SLOW_MILLIS = 250L;
     private final JavaPlugin plugin;
     private final InteriorService interiors;
     private final NamespacedKey displayKey;
@@ -42,6 +44,15 @@ public final class PreviewService {
     private final Set<UUID> pendingPlayers = ConcurrentHashMap.newKeySet();
     private final Map<UUID, Integer> routedBlocks = new ConcurrentHashMap<>();
     private final Set<UUID> routedPlayers = ConcurrentHashMap.newKeySet();
+    /** Visibility only depends on the surrounding block layout, so it outlives scene rebuilds.
+     *  Written from the block scan thread and cleared from the server thread on shutdown. */
+    private final Map<OcclusionKey, OcclusionResult> occlusionCache = Collections.synchronizedMap(
+            new LinkedHashMap<>(16, .75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<OcclusionKey, OcclusionResult> eldest) {
+                    return size() > OCCLUSION_CACHE_ENTRIES;
+                }
+            });
     private final AtomicBoolean routeScheduled = new AtomicBoolean();
     private final AtomicBoolean applyScheduled = new AtomicBoolean();
     private volatile List<JarRoute> routes = List.of();
@@ -67,6 +78,9 @@ public final class PreviewService {
     private int exteriorMaximumPlayerMarkers;
     private int interiorMaximumPlayerMarkers;
     private int outsideRadius;
+    private boolean occlusionEnabled;
+    private int occlusionEyeSpacing;
+    private int occlusionMaximumEyePoints;
     private volatile Set<PreviewChunk> desiredChunkTickets = Set.of();
     private volatile long chunkTicketGeneration;
     private boolean sessionReconcilePending = true;
@@ -135,6 +149,7 @@ public final class PreviewService {
         routeScheduled.set(false); applyScheduled.set(false); routes = List.of();
         desiredChunkTickets = Set.of();
         pendingChunkTickets.clear();
+        occlusionCache.clear();
         releaseChunkTickets();
         for (JarScene scene : scenes.values()) scene.removeAll();
         scenes.clear();
@@ -807,17 +822,22 @@ public final class PreviewService {
         SnapshotWorld world = snapshot.outside;
         JarAssembly assembly = request.jar.assembly();
         Set<JarAssembly.Cell> occupied = assembly.cells();
+        List<OutsideOffset> offsets = outsideOffsets(radius, assembly);
+        // Culling before the budget is spent means the cap now buys only blocks that can be seen.
+        BitSet visible = occlusionEnabled ? occlusionVisibility(request, world, offsets) : null;
         // The support block directly below the jar is rendered separately as the cell-wide floor.
-        for (OutsideOffset offset : outsideOffsets(radius, assembly)) {
+        for (int index = 0; index < offsets.size(); index++) {
+            OutsideOffset offset = offsets.get(index);
             if (occupied.contains(new JarAssembly.Cell(offset.dx, offset.dy, offset.dz))
                     || occupied.contains(new JarAssembly.Cell(offset.dx, offset.dy + 1, offset.dz))) continue;
             int x = request.outsideX + offset.dx;
             int y = request.outsideY + offset.dy;
             int z = request.outsideZ + offset.dz;
             if (y < world.minHeight || y >= world.maxHeight) continue;
-            Material material = world.type(x, y, z);
             // Buried blocks would eat the whole budget before any surface is reached.
-            if (renderable(material, true) && exposed(world, x, y, z)) {
+            boolean shown = visible != null ? visible.get(index)
+                    : renderable(world.type(x, y, z), true) && exposed(world, x, y, z);
+            if (shown) {
                 BlockData blockData = world.blockData(x, y, z);
                 result.add(new OutsideSample(offset.dx, offset.dy, offset.dz, blockData));
                 if (result.size() >= maximum) break;
@@ -825,6 +845,63 @@ public final class PreviewService {
         }
         return result;
     }
+
+    /**
+     * Marks which of the sampled offsets an occupant can actually see out of the jar. Runs on the
+     * block scan thread and is cached against the surrounding block layout, so the rays are only
+     * traced again once someone changes a block near the jar.
+     */
+    private BitSet occlusionVisibility(BlockScanRequest request, SnapshotWorld world,
+                                       List<OutsideOffset> offsets) {
+        JarAssembly assembly = request.jar.assembly();
+        PreviewOcclusion.OccluderGrid grid = occluderGrid(request, world, assembly);
+        OcclusionKey key = new OcclusionKey(request.outsideWorld.getUID(), request.outsideX,
+                request.outsideY, request.outsideZ, request.radius, request.jar.scale(), assembly);
+        long fingerprint = grid.fingerprint();
+        OcclusionResult cached = occlusionCache.get(key);
+        if (cached != null && cached.fingerprint == fingerprint) return cached.visible;
+
+        double[] eyes = PreviewOcclusion.eyePoints(assembly, request.jar.scale(),
+                occlusionEyeSpacing, occlusionMaximumEyePoints);
+        long started = System.nanoTime();
+        BitSet visible = new BitSet(offsets.size());
+        for (int index = 0; index < offsets.size(); index++) {
+            OutsideOffset offset = offsets.get(index);
+            if (!grid.renderable(offset.dx, offset.dy, offset.dz)) continue;
+            if (PreviewOcclusion.visible(grid, eyes, offset.dx, offset.dy, offset.dz)) visible.set(index);
+        }
+        long millis = (System.nanoTime() - started) / 1_000_000L;
+        if (millis >= OCCLUSION_SLOW_MILLIS) {
+            plugin.getLogger().warning("Occlusion culling for jar " + request.jarId + " took "
+                    + millis + "ms (" + eyes.length / 3 + " eye points, "
+                    + offsets.size() + " offsets); lower preview.interior.outside-radius or"
+                    + " preview.interior.occlusion.max-eye-points.");
+        }
+        occlusionCache.put(key, new OcclusionResult(fingerprint, visible));
+        return visible;
+    }
+
+    /** Occupancy of every outside block the preview can reach, taken from the raw snapshot so
+     *  buried blocks and blocks past the display budget still hide what is behind them. */
+    private PreviewOcclusion.OccluderGrid occluderGrid(BlockScanRequest request, SnapshotWorld world,
+                                                       JarAssembly assembly) {
+        int radius = request.radius;
+        PreviewOcclusion.OccluderGrid grid = new PreviewOcclusion.OccluderGrid(-radius, -radius, -radius,
+                assembly.width() + 2 * radius, assembly.height() + 2 * radius, assembly.depth() + 2 * radius);
+        for (int dy = -radius; dy < assembly.height() + radius; dy++) {
+            int y = request.outsideY + dy;
+            if (y < world.minHeight || y >= world.maxHeight) continue;
+            for (int dx = -radius; dx < assembly.width() + radius; dx++) {
+                for (int dz = -radius; dz < assembly.depth() + radius; dz++) {
+                    Material material = world.type(request.outsideX + dx, y, request.outsideZ + dz);
+                    if (material.isOccluding()) grid.setOccluding(dx, dy, dz);
+                    if (renderable(material, true)) grid.setRenderable(dx, dy, dz);
+                }
+            }
+        }
+        return grid;
+    }
+
 
     private List<OutsideOffset> outsideOffsets(int radius, JarAssembly assembly) {
         OutsideArea area = new OutsideArea(radius, assembly.width(), assembly.height(), assembly.depth());
@@ -1246,6 +1323,9 @@ public final class PreviewService {
         exteriorMaximumPlayerMarkers = bounded("preview.exterior.max-player-markers", 16, 0, 100);
         interiorMaximumPlayerMarkers = bounded("preview.interior.max-player-markers", 16, 0, 100);
         outsideRadius = bounded("preview.interior.outside-radius", 6, 1, 24);
+        occlusionEnabled = plugin.getConfig().getBoolean("preview.interior.occlusion.enabled", true);
+        occlusionEyeSpacing = bounded("preview.interior.occlusion.eye-spacing", 15, 1, 64);
+        occlusionMaximumEyePoints = bounded("preview.interior.occlusion.max-eye-points", 128, 1, 4096);
     }
 
     private void removeOrphans() {
@@ -1384,6 +1464,9 @@ public final class PreviewService {
                                    int exteriorFingerprint, int interiorFingerprint) {}
     private record SnapshotBlockScan(BlockScanRequest request, SnapshotWorld interior,
                                      SnapshotWorld outside) {}
+    private record OcclusionKey(UUID world, int x, int y, int z, int radius, int scale,
+                                JarAssembly assembly) {}
+    private record OcclusionResult(long fingerprint, BitSet visible) {}
     private record ChunkCoordinate(int x, int z) {}
     private record PreviewChunk(UUID worldId, int x, int z) {}
     private record SnapshotWorld(int minHeight, int maxHeight, Map<Long, ChunkSnapshot> chunks) {

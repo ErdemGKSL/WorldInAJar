@@ -1,5 +1,4 @@
 # Entity preview backend: manequeen (built-in) or protocol (requires ProtocolLib with 1.21.11 support).
-# "mannequin" is also accepted as an alias for manequeen.
 entity-preview: manequeen
 
 # Interior edge length in blocks. Existing jars retain the scale they were created with.
@@ -74,3 +73,14 @@ preview:
     max-entities: 64
     # Represent nearby outside players with viewer-specific virtual mannequins.
     show-players: true
+    # Hide outside blocks that cannot be seen from anywhere inside the jar. Minecraft does no
+    # client-side occlusion culling for block displays, so every hidden block otherwise costs the
+    # client a jar-sized cube to draw every frame. Visibility is traced off the server thread and
+    # cached, so it is only recomputed when the blocks around the jar change.
+    occlusion:
+      enabled: true
+      # Spacing, in interior blocks, between the eye points visibility is traced from. Smaller
+      # keeps more blocks (safer, slower); the whole interior volume is covered either way.
+      eye-spacing: 15
+      # Upper bound on eye points. The spacing widens automatically to stay under it.
+      max-eye-points: 128
