@@ -27,9 +27,12 @@ class RuntimeAdapterLoaderTest {
     }
 
     @Test
-    void normalizesPaperBuildVersionBeforeChoosingTheAdapter() {
-        assertEquals("26.1.1", RuntimeAdapterLoader.normalizeMinecraftVersion("26.1.1.build.29"));
-        assertEquals("26.1.1", RuntimeAdapterLoader.normalizeMinecraftVersion("26.1.1"));
+    void mapsPaperBuildVersionToTwentySixOneOneAdapter() {
+        RuntimeAdapterLoader.Selection selection = RuntimeAdapterLoader.select("26.1.1.build.29");
+
+        assertTrue(selection.exact());
+        assertEquals("26.1.1", selection.adapterVersion());
+        assertTrue(selection.candidates().get("PAPER").contains(".v26_1_1.paper."));
     }
 
     @Test

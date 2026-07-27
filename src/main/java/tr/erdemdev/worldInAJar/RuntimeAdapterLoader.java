@@ -18,7 +18,7 @@ public final class RuntimeAdapterLoader {
     }
 
     public static RuntimeAdapter load(JavaPlugin plugin) {
-        String minecraft = normalizeMinecraftVersion(Bukkit.getBukkitVersion().split("-", 2)[0]);
+        String minecraft = Bukkit.getBukkitVersion().split("-", 2)[0];
         ServerPlatform platform = detectPlatform(plugin.getServer().getName());
         Selection selection = select(minecraft);
         if (!selection.exact()) {
@@ -39,6 +39,9 @@ public final class RuntimeAdapterLoader {
     }
 
     static Selection select(String minecraft) {
+        if (minecraft.matches("26\\.1\\.1\\.build\\.\\d+")) {
+            return new Selection("26.1.1", V26_1_1, true);
+        }
         Map<String, String> exact = switch (minecraft) {
             case "1.21.11" -> V1_21_11;
             case "26.1" -> V26_1;
@@ -60,12 +63,6 @@ public final class RuntimeAdapterLoader {
             return new Selection("26.1.2", V26_1_2, false);
         }
         throw unsupported(minecraft);
-    }
-
-    /** Paper 26.1.1 reports its API as e.g. {@code 26.1.1.build.29}; adapters are
-     * selected by the underlying Minecraft release, not Paper's build suffix. */
-    static String normalizeMinecraftVersion(String version) {
-        return version.replaceFirst("\\.build\\.\\d+$", "");
     }
 
     private static IllegalStateException unsupported(String minecraft) {

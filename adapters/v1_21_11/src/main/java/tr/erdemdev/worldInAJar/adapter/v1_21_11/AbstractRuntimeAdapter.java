@@ -1,10 +1,14 @@
 package tr.erdemdev.worldInAJar.adapter.v1_21_11;
 
 import org.bukkit.Chunk;
+import org.bukkit.GameRule;
 import org.bukkit.Location;
 import org.bukkit.World;
+import org.bukkit.WorldCreator;
+import org.bukkit.WorldType;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
+import org.bukkit.generator.ChunkGenerator;
 import org.bukkit.plugin.java.JavaPlugin;
 import tr.erdemdev.worldInAJar.RuntimeAdapter;
 import tr.erdemdev.worldInAJar.ServerPlatform;
@@ -37,6 +41,44 @@ public abstract class AbstractRuntimeAdapter implements RuntimeAdapter {
     @Override
     public final VirtualEntityFactory virtualEntities() {
         return virtualEntities;
+    }
+
+    @Override
+    public World createInteriorWorld(String worldName, ChunkGenerator generator) {
+        return createInteriorWorld(worldName, generator, true);
+    }
+
+    protected final World createInteriorWorld(String worldName, ChunkGenerator generator, boolean flatPreset) {
+        WorldCreator creator = new WorldCreator(worldName).environment(World.Environment.NORMAL)
+                .generator(generator).generateStructures(false);
+        if (flatPreset) creator.type(WorldType.FLAT);
+        return creator.createWorld();
+    }
+
+    @Override
+    public void configureInteriorWorld(World world, boolean mobSpawning) {
+        setBooleanRule(world, "SPAWN_MOBS", "DO_MOB_SPAWNING", mobSpawning);
+        setBooleanRule(world, "ADVANCE_WEATHER", "DO_WEATHER_CYCLE", false);
+    }
+
+    @SuppressWarnings("unchecked")
+    private void setBooleanRule(World world, String currentField, String legacyField, boolean value) {
+        GameRule<?> rule = gameRuleField(currentField);
+        if (rule == null) rule = gameRuleField(legacyField);
+        if (rule == null) {
+            plugin.getLogger().warning("No game rule found for " + currentField + "/" + legacyField + ".");
+            return;
+        }
+        world.setGameRule((GameRule<Boolean>) rule, value);
+    }
+
+    private static GameRule<?> gameRuleField(String fieldName) {
+        try {
+            Object value = GameRule.class.getField(fieldName).get(null);
+            return value instanceof GameRule<?> rule ? rule : null;
+        } catch (ReflectiveOperationException ignored) {
+            return null;
+        }
     }
 
     @Override

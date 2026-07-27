@@ -5,6 +5,7 @@ import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
+import org.bukkit.generator.ChunkGenerator;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.util.concurrent.CompletableFuture;
@@ -19,6 +20,10 @@ public interface RuntimeAdapter {
     ServerPlatform platform();
 
     VirtualEntityFactory virtualEntities();
+
+    World createInteriorWorld(String worldName, ChunkGenerator generator);
+
+    void configureInteriorWorld(World world, boolean mobSpawning);
 
     CompletableFuture<Chunk> loadChunk(World world, int x, int z, boolean generate);
 
