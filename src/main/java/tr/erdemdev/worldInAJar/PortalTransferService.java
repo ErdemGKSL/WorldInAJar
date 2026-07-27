@@ -36,6 +36,7 @@ public final class PortalTransferService {
     private final InteriorService interiors;
     private final TeleportPolicy policy;
     private final Map<UUID, Location> previousItemLocations = new HashMap<>();
+    private final Map<UUID, Location> previousLivingLocations = new HashMap<>();
     private final Map<Entity, Long> cooldowns = new IdentityHashMap<>();
     private BukkitTask itemTask;
     private long tick;
@@ -58,6 +59,7 @@ public final class PortalTransferService {
         if (itemTask != null) itemTask.cancel();
         itemTask = null;
         previousItemLocations.clear();
+        previousLivingLocations.clear();
         cooldowns.clear();
     }
 
@@ -95,12 +97,51 @@ public final class PortalTransferService {
     private void tickItems() {
         tick++;
         Set<UUID> seen = new HashSet<>();
+        Set<UUID> seenLiving = new HashSet<>();
         for (JarRecord jar : repository.withPortals()) {
-            if (jar.placed()) scanExteriorItems(jar, seen);
+            if (jar.placed()) {
+                scanExteriorItems(jar, seen);
+                scanExteriorLiving(jar, seenLiving);
+            }
             scanInteriorItems(jar, seen);
+            scanInteriorLiving(jar, seenLiving);
         }
         previousItemLocations.keySet().retainAll(seen);
+        previousLivingLocations.keySet().retainAll(seenLiving);
         cooldowns.entrySet().removeIf(entry -> entry.getValue() <= tick);
+    }
+
+    private void scanExteriorLiving(JarRecord jar, Set<UUID> seen) {
+        Location center = jar.outsideCenter();
+        if (center == null) return;
+        BoundingBox bounds = BoundingBox.of(center, jar.width() / 2.0 + 1.5,
+                jar.height() / 2.0 + 1.75, jar.depth() / 2.0 + 1.5);
+        for (Entity candidate : center.getWorld().getNearbyEntities(bounds,
+                entity -> entity instanceof LivingEntity)) {
+            LivingEntity entity = (LivingEntity) candidate;
+            Location to = entity.getLocation();
+            Location from = previousLivingLocation(entity, to, seen);
+            move(entity, from, to);
+        }
+    }
+
+    private void scanInteriorLiving(JarRecord jar, Set<UUID> seen) {
+        BoundingBox bounds = interiorDoorBounds(jar).expand(.75);
+        for (Entity candidate : interiors.world().getNearbyEntities(bounds,
+                entity -> entity instanceof LivingEntity)) {
+            LivingEntity entity = (LivingEntity) candidate;
+            Location to = entity.getLocation();
+            Location from = previousLivingLocation(entity, to, seen);
+            move(entity, from, to);
+        }
+    }
+
+    private Location previousLivingLocation(LivingEntity entity, Location current, Set<UUID> seen) {
+        UUID id = entity.getUniqueId();
+        seen.add(id);
+        Location previous = previousLivingLocations.put(id, current.clone());
+        if (previous != null && previous.getWorld() == current.getWorld()) return previous;
+        return current.clone().subtract(entity.getVelocity());
     }
 
     private void scanExteriorItems(JarRecord jar, Set<UUID> seen) {
@@ -307,7 +348,8 @@ public final class PortalTransferService {
         double y = cell.minY() + jar.doorY() * jar.scale()
                 + (entity instanceof LivingEntity ? 1.05 : 1.4);
         return new Location(interiors.world(), x, y, z,
-                entity == null ? 0 : entity.getYaw(), entity == null ? 0 : entity.getPitch());
+                entity == null ? 0 : entity.getLocation().getYaw(),
+                entity == null ? 0 : entity.getLocation().getPitch());
     }
 
     private Location outsideDestination(JarRecord jar, Entity entity) {
@@ -318,7 +360,8 @@ public final class PortalTransferService {
         double x = doorBlock.getX() + .5;
         double z = doorBlock.getZ() + .5;
         return new Location(entityWorld(jar), x + door.getModX() * offset, y,
-                z + door.getModZ() * offset, entity.getYaw(), entity.getPitch());
+                z + door.getModZ() * offset,
+                entity.getLocation().getYaw(), entity.getLocation().getPitch());
     }
 
     private World entityWorld(JarRecord jar) {
@@ -360,7 +403,7 @@ public final class PortalTransferService {
                 }
             }
             for (Chunk chunk : world.getLoadedChunks()) {
-                for (BlockState state : chunk.getTileEntities(false)) {
+                for (BlockState state : chunk.getTileEntities()) {
                     if (state instanceof InventoryHolder holder && contains(holder.getInventory(), jarId)) {
                         return new Carrier(holder.getInventory(), state.getLocation().add(.5, 1, .5));
                     }

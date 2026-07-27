@@ -1,6 +1,5 @@
 package tr.erdemdev.worldInAJar;
 
-import net.kyori.adventure.text.Component;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.inventory.ItemStack;
@@ -56,13 +55,14 @@ public final class JarItems {
         assembly = assembly.normalized();
         JarAssembly storedAssembly = assembly;
         ItemStack item = new ItemStack(Material.GLASS);
-        item.editMeta(meta -> {
+        ItemMeta meta = item.getItemMeta();
+        if (meta != null) {
             String dimensions = storedAssembly.width() + "x" + storedAssembly.height()
                     + "x" + storedAssembly.depth();
-            meta.displayName(Component.text(customName != null && !customName.isBlank() ? customName
+            meta.setDisplayName(customName != null && !customName.isBlank() ? customName
                     : storedAssembly.cells().size() == 1
-                    ? "World in a Jar" : "Combined World Jar (" + dimensions + ")"));
-            meta.lore(lore(id, storedAssembly, occupantNames));
+                    ? "World in a Jar" : "Combined World Jar (" + dimensions + ")");
+            meta.setLore(lore(id, storedAssembly, occupantNames));
             meta.setMaxStackSize(1);
             meta.getPersistentDataContainer().set(itemKey, PersistentDataType.BYTE, (byte) 1);
             meta.getPersistentDataContainer().set(widthKey, PersistentDataType.INTEGER, storedAssembly.width());
@@ -78,7 +78,8 @@ public final class JarItems {
             meta.getPersistentDataContainer().set(partsKey, PersistentDataType.INTEGER_ARRAY, encoded);
             meta.getPersistentDataContainer().set(partsVersionKey, PersistentDataType.INTEGER, 2);
             if (id != null) meta.getPersistentDataContainer().set(idKey, PersistentDataType.STRING, id.toString());
-        });
+            item.setItemMeta(meta);
+        }
         return item;
     }
 
@@ -86,19 +87,19 @@ public final class JarItems {
         UUID id = id(item);
         JarAssembly assembly = assembly(item);
         if (id == null || assembly == null) return false;
-        List<Component> updated = lore(id, assembly, occupantNames);
+        List<String> updated = lore(id, assembly, occupantNames);
         ItemMeta meta = item.getItemMeta();
-        if (meta != null && updated.equals(meta.lore())) return false;
-        item.editMeta(edited -> edited.lore(updated));
+        if (meta == null || updated.equals(meta.getLore())) return false;
+        meta.setLore(updated);
+        item.setItemMeta(meta);
         return true;
     }
 
-    static List<Component> lore(UUID id, JarAssembly assembly, Collection<String> occupantNames) {
+    static List<String> lore(UUID id, JarAssembly assembly, Collection<String> occupantNames) {
         String dimensions = assembly.width() + "x" + assembly.height() + "x" + assembly.depth();
-        List<Component> lore = new ArrayList<>();
-        lore.add(Component.text(id == null
-                ? "Place to create a miniature world" : "Contains a persistent miniature world"));
-        lore.add(Component.text("Footprint: " + dimensions + ", parts: " + assembly.parts().size()));
+        List<String> lore = new ArrayList<>();
+        lore.add(id == null ? "Place to create a miniature world" : "Contains a persistent miniature world");
+        lore.add("Footprint: " + dimensions + ", parts: " + assembly.parts().size());
         if (id == null) return List.copyOf(lore);
 
         List<String> visibleNames = occupantNames.stream()
@@ -107,10 +108,10 @@ public final class JarItems {
                 .sorted(String.CASE_INSENSITIVE_ORDER.thenComparing(Comparator.naturalOrder()))
                 .toList();
         if (visibleNames.isEmpty()) {
-            lore.add(Component.text("Players inside: None"));
+            lore.add("Players inside: None");
         } else {
-            lore.add(Component.text("Players inside (" + visibleNames.size() + "):"));
-            visibleNames.forEach(name -> lore.add(Component.text("- " + name)));
+            lore.add("Players inside (" + visibleNames.size() + "):");
+            visibleNames.forEach(name -> lore.add("- " + name));
         }
         return List.copyOf(lore);
     }
@@ -123,11 +124,13 @@ public final class JarItems {
 
     public ItemStack createPortalSide() {
         ItemStack item = new ItemStack(Material.PURPLE_STAINED_GLASS_PANE);
-        item.editMeta(meta -> {
-            meta.displayName(Component.text("Jar Portal Side"));
-            meta.lore(List.of(Component.text("Right-click an exposed jar side to install")));
+        ItemMeta meta = item.getItemMeta();
+        if (meta != null) {
+            meta.setDisplayName("Jar Portal Side");
+            meta.setLore(List.of("Right-click an exposed jar side to install"));
             meta.getPersistentDataContainer().set(portalSideKey, PersistentDataType.BYTE, (byte) 1);
-        });
+            item.setItemMeta(meta);
+        }
         return item;
     }
 

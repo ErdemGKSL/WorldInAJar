@@ -1,4 +1,4 @@
-package tr.erdemdev.worldInAJar;
+package tr.erdemdev.worldInAJar.adapter.v1_21_11;
 
 import com.mojang.datafixers.util.Pair;
 import com.mojang.math.Transformation;
@@ -34,16 +34,29 @@ import org.bukkit.craftbukkit.entity.CraftPlayer;
 import org.bukkit.craftbukkit.CraftWorld;
 import org.bukkit.entity.Player;
 import org.joml.Matrix4f;
+import tr.erdemdev.worldInAJar.VirtualEntityFactory;
 
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 
+public final class NmsVirtualEntityFactory implements VirtualEntityFactory {
+    @Override
+    public VirtualBlockDisplay createBlockDisplay(Location location, BlockData blockData, Matrix4f matrix) {
+        return new NmsVirtualBlockDisplay(location, blockData, matrix);
+    }
+
+    @Override
+    public VirtualMannequin createMannequin(Player source, Location location, float scale) {
+        return new NmsVirtualMannequin(source, location, scale);
+    }
+}
+
 /** A client-side entity definition which is never registered with a world or chunk. */
-abstract class VirtualEntity {
+abstract class NmsVirtualEntity implements VirtualEntityFactory.VirtualEntity {
     protected final Entity handle;
 
-    protected VirtualEntity(Entity handle, Location location) {
+    protected NmsVirtualEntity(Entity handle, Location location) {
         this.handle = handle;
         moveHandle(location);
     }
@@ -52,14 +65,14 @@ abstract class VirtualEntity {
         return handle.getId();
     }
 
-    void spawn(Player viewer) {
+    public void spawn(Player viewer) {
         send(viewer, new ClientboundAddEntityPacket(handle.getId(), handle.getUUID(),
                 handle.getX(), handle.getY(), handle.getZ(), handle.getXRot(), handle.getYRot(),
                 handle.getType(), 0, Vec3.ZERO, handle.getYHeadRot()));
         send(viewer, new ClientboundSetEntityDataPacket(handle.getId(), handle.getEntityData().packAll()));
     }
 
-    void destroy(Player viewer) {
+    public void destroy(Player viewer) {
         send(viewer, new ClientboundRemoveEntitiesPacket(handle.getId()));
     }
 
@@ -103,14 +116,14 @@ abstract class VirtualEntity {
     }
 }
 
-final class VirtualBlockDisplay extends VirtualEntity {
+final class NmsVirtualBlockDisplay extends NmsVirtualEntity implements VirtualEntityFactory.VirtualBlockDisplay {
     private final Display.BlockDisplay display;
 
-    VirtualBlockDisplay(Location location, BlockData blockData, Matrix4f matrix) {
+    NmsVirtualBlockDisplay(Location location, BlockData blockData, Matrix4f matrix) {
         this(new Display.BlockDisplay(EntityType.BLOCK_DISPLAY, null), location, blockData, matrix);
     }
 
-    private VirtualBlockDisplay(Display.BlockDisplay display, Location location, BlockData blockData, Matrix4f matrix) {
+    private NmsVirtualBlockDisplay(Display.BlockDisplay display, Location location, BlockData blockData, Matrix4f matrix) {
         super(display, location);
         this.display = display;
         display.setBlockState(((CraftBlockData) blockData).getState());
@@ -121,27 +134,27 @@ final class VirtualBlockDisplay extends VirtualEntity {
         display.setInvulnerable(true);
     }
 
-    void spawn(Player viewer, Matrix4f matrix) {
+    public void spawn(Player viewer, Matrix4f matrix) {
         display.setTransformation(new Transformation(matrix));
         super.spawn(viewer);
     }
 
-    void transform(Player viewer, Matrix4f matrix) {
+    public void transform(Player viewer, Matrix4f matrix) {
         display.setTransformation(new Transformation(matrix));
         metadata(List.of(viewer));
     }
 }
 
-final class VirtualNametag extends VirtualEntity {
+final class NmsVirtualNametag extends NmsVirtualEntity {
     private final Display.TextDisplay display;
     private float scale;
 
-    VirtualNametag(Location location, String name, float scale) {
+    NmsVirtualNametag(Location location, String name, float scale) {
         this(new Display.TextDisplay(EntityType.TEXT_DISPLAY,
                 ((CraftWorld) location.getWorld()).getHandle()), location, name, scale);
     }
 
-    private VirtualNametag(Display.TextDisplay display, Location location, String name, float scale) {
+    private NmsVirtualNametag(Display.TextDisplay display, Location location, String name, float scale) {
         super(display, location);
         this.display = display;
         this.scale = scale;
@@ -168,9 +181,9 @@ final class VirtualNametag extends VirtualEntity {
     }
 }
 
-final class VirtualMannequin extends VirtualEntity {
+final class NmsVirtualMannequin extends NmsVirtualEntity implements VirtualEntityFactory.VirtualMannequin {
     private final Mannequin mannequin;
-    private final VirtualNametag nametag;
+    private final NmsVirtualNametag nametag;
     private final float movementScale;
     private final float renderScale;
     private List<SynchedEntityData.DataValue<?>> sharedMetadata = List.of();
@@ -183,12 +196,12 @@ final class VirtualMannequin extends VirtualEntity {
     private record MovementSnapshot(double x, double y, double z, float yaw, float pitch,
                                     float headYaw, Vec3 velocity, boolean onGround) {}
 
-    VirtualMannequin(Player target, Location location, float scale) {
+    NmsVirtualMannequin(Player target, Location location, float scale) {
         this(new Mannequin(EntityType.MANNEQUIN,
                 ((CraftWorld) location.getWorld()).getHandle()), target, location, scale);
     }
 
-    private VirtualMannequin(Mannequin mannequin, Player target, Location location, float scale) {
+    private NmsVirtualMannequin(Mannequin mannequin, Player target, Location location, float scale) {
         super(mannequin, location);
         this.mannequin = mannequin;
         this.movementScale = scale;
@@ -200,10 +213,10 @@ final class VirtualMannequin extends VirtualEntity {
         AttributeInstance size = mannequin.getAttribute(Attributes.SCALE);
         if (size != null) size.setBaseValue(renderScale);
         updateState(target);
-        this.nametag = new VirtualNametag(nametagLocation(location), target.getName(), renderScale);
+        this.nametag = new NmsVirtualNametag(nametagLocation(location), target.getName(), renderScale);
     }
 
-    void update(Player target, Location location, Collection<Player> viewers) {
+    public void update(Player target, Location location, Collection<Player> viewers) {
         net.minecraft.server.level.ServerPlayer source = ((CraftPlayer) target).getHandle();
         int oldEquipment = equipmentFingerprint;
         boolean oldSwinging = swinging;
@@ -241,7 +254,7 @@ final class VirtualMannequin extends VirtualEntity {
         }
     }
 
-    void sleep(Location location, Collection<Player> viewers) {
+    public void sleep(Location location, Collection<Player> viewers) {
         Location sleeping = location.clone();
         sleeping.setPitch(90f);
         positionSync(viewers, sleeping, sleeping.getYaw(), Vec3.ZERO, true);
@@ -249,7 +262,7 @@ final class VirtualMannequin extends VirtualEntity {
     }
 
     @Override
-    void spawn(Player viewer) {
+    public void spawn(Player viewer) {
         super.spawn(viewer);
         Collection<AttributeInstance> attributes = mannequin.getAttributes().getSyncableAttributes();
         if (!attributes.isEmpty()) send(viewer, new ClientboundUpdateAttributesPacket(id(), attributes));
@@ -258,7 +271,7 @@ final class VirtualMannequin extends VirtualEntity {
     }
 
     @Override
-    void destroy(Player viewer) {
+    public void destroy(Player viewer) {
         super.destroy(viewer);
         nametag.destroy(viewer);
     }

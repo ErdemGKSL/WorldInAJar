@@ -23,8 +23,13 @@ import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
 public final class InteriorService {
+    private static long chunkKey(int x, int z) {
+        return ((long) z << 32) | (x & 0xffffffffL);
+    }
+
     private final JavaPlugin plugin;
     private final TeleportPolicy policy;
+    private final RuntimeAdapter runtime;
     private final String worldName;
     private final int gap;
     private final int baseY;
@@ -43,9 +48,10 @@ public final class InteriorService {
     private BukkitTask worldJobTask;
     private boolean operationActive;
 
-    public InteriorService(JavaPlugin plugin, TeleportPolicy policy) {
+    public InteriorService(JavaPlugin plugin, TeleportPolicy policy, RuntimeAdapter runtime) {
         this.plugin = plugin;
         this.policy = policy;
+        this.runtime = runtime;
         worldName = plugin.getConfig().getString("interior.world", "world_in_a_jar");
         gap = plugin.getConfig().getInt("interior.cell-gap", 8);
         baseY = plugin.getConfig().getInt("interior.base-y", 64);
@@ -65,8 +71,9 @@ public final class InteriorService {
         }
         if (world == null) throw new IllegalStateException("Paper could not create the jar interior world");
         world.setAutoSave(true);
-        world.setGameRule(GameRule.DO_MOB_SPAWNING, plugin.getConfig().getBoolean("interior.mob-spawning", true));
-        world.setGameRule(GameRule.DO_WEATHER_CYCLE, false);
+        world.setGameRule(GameRule.SPAWN_MOBS,
+                plugin.getConfig().getBoolean("interior.mob-spawning", true));
+        world.setGameRule(GameRule.ADVANCE_WEATHER, false);
         clearWeather();
     }
 
@@ -244,7 +251,7 @@ public final class InteriorService {
                     c.minX() + first.x() * jar.scale() + jar.scale() / 2.0,
                     c.minY() + first.y() * jar.scale() + 1.1,
                     c.minZ() + first.z() * jar.scale() + jar.scale() / 2.0,
-                    player.getYaw(), player.getPitch());
+                    player.getLocation().getYaw(), player.getLocation().getPitch());
         }
         Location doorBlock = jar.doorBlockLocation();
         int tileX = doorBlock.getBlockX() - jar.x(), tileZ = doorBlock.getBlockZ() - jar.z();
@@ -256,7 +263,8 @@ public final class InteriorService {
         else if (jar.door() == BlockFace.SOUTH) z = c.minZ() + (tileZ + 1) * jar.scale() - margin - .5;
         else if (jar.door() == BlockFace.WEST) x = c.minX() + tileX * jar.scale() + margin + .5;
         else if (jar.door() == BlockFace.EAST) x = c.minX() + (tileX + 1) * jar.scale() - margin - .5;
-        return new Location(world, x, y, z, player.getYaw(), player.getPitch());
+        return new Location(world, x, y, z,
+                player.getLocation().getYaw(), player.getLocation().getPitch());
     }
 
     public ExitResult exit(Player player, JarRepository repository) {
@@ -501,7 +509,7 @@ public final class InteriorService {
         Set<ChunkCoordinate> coordinates = new HashSet<>();
         for (JarRecord jar : jars) coordinates.addAll(interiorChunks(jar));
         List<CompletableFuture<Chunk>> loads = coordinates.stream()
-                .map(coordinate -> world.getChunkAtAsync(coordinate.x(), coordinate.z(), true)
+                .map(coordinate -> runtime.loadChunk(world, coordinate.x(), coordinate.z(), true)
                         .exceptionally(exception -> {
                             plugin.getLogger().warning("Could not load an interior chunk: "
                                     + exception.getMessage());
@@ -550,7 +558,7 @@ public final class InteriorService {
 
     private void retainChunks(List<Chunk> chunks) {
         for (Chunk chunk : chunks) {
-            long key = Chunk.getChunkKey(chunk.getX(), chunk.getZ());
+            long key = chunkKey(chunk.getX(), chunk.getZ());
             if (retainedChunkCounts.merge(key, 1, Integer::sum) == 1) {
                 chunk.addPluginChunkTicket(plugin);
                 retainedChunks.put(key, chunk);
@@ -560,7 +568,7 @@ public final class InteriorService {
 
     private void releaseChunks(List<Chunk> chunks) {
         for (Chunk chunk : chunks) {
-            long key = Chunk.getChunkKey(chunk.getX(), chunk.getZ());
+            long key = chunkKey(chunk.getX(), chunk.getZ());
             Integer count = retainedChunkCounts.get(key);
             if (count == null) continue;
             if (count > 1) {

@@ -1,6 +1,5 @@
 package tr.erdemdev.worldInAJar;
 
-import net.kyori.adventure.text.Component;
 import org.bukkit.Bukkit;
 import org.bukkit.Chunk;
 import org.bukkit.Location;
@@ -105,7 +104,7 @@ public final class JarBackService implements Listener {
         int size = Math.min(54, (jars.size() + 8) / 9 * 9);
         List<UUID> slots = new ArrayList<>();
         Menu menu = new Menu(slots);
-        Inventory inventory = Bukkit.createInventory(menu, size, Component.text("Retrieve Your Jars"));
+        Inventory inventory = Bukkit.createInventory(menu, size, "Retrieve Your Jars");
         menu.inventory = inventory;
         for (JarRecord jar : jars) {
             if (slots.size() >= size) break;
@@ -119,17 +118,18 @@ public final class JarBackService implements Listener {
     private ItemStack displayItem(JarRecord jar) {
         ItemStack stack = new ItemStack(Material.GLASS);
         String name = repository.name(jar.id());
-        stack.editMeta(meta -> {
-            meta.displayName(Component.text(name != null ? name : "World in a Jar"));
-            List<Component> lore = new ArrayList<>();
-            lore.add(Component.text("Footprint: " + jar.width() + "x" + jar.height()
-                    + "x" + jar.depth()));
-            lore.add(Component.text(jar.placed()
+        org.bukkit.inventory.meta.ItemMeta meta = stack.getItemMeta();
+        if (meta != null) {
+            meta.setDisplayName(name != null ? name : "World in a Jar");
+            List<String> lore = new ArrayList<>();
+            lore.add("Footprint: " + jar.width() + "x" + jar.height() + "x" + jar.depth());
+            lore.add(jar.placed()
                     ? "Placed in " + jar.world() + " at " + jar.x() + ", " + jar.y() + ", " + jar.z()
-                    : "Loose as an item"));
-            lore.add(Component.text("Click to retrieve into your inventory"));
-            meta.lore(lore);
-        });
+                    : "Loose as an item");
+            lore.add("Click to retrieve into your inventory");
+            meta.setLore(lore);
+            stack.setItemMeta(meta);
+        }
         return stack;
     }
 
@@ -216,7 +216,7 @@ public final class JarBackService implements Listener {
                 }
             }
             for (Chunk chunk : world.getLoadedChunks()) {
-                for (BlockState state : chunk.getTileEntities(false)) {
+                for (BlockState state : chunk.getTileEntities()) {
                     if (state instanceof InventoryHolder holder) removeFrom(holder.getInventory(), jarId);
                 }
             }

@@ -9,6 +9,9 @@ import org.bukkit.entity.Player;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.joml.Matrix4f;
+import tr.erdemdev.worldInAJar.VirtualEntityFactory.VirtualBlockDisplay;
+import tr.erdemdev.worldInAJar.VirtualEntityFactory.VirtualEntity;
+import tr.erdemdev.worldInAJar.VirtualEntityFactory.VirtualMannequin;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -19,6 +22,19 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Maintains viewer-specific, bidirectional display-only views for every placed jar. */
 public final class PreviewService {
+    private static long chunkKey(int x, int z) {
+        return ((long) z << 32) | (x & 0xffffffffL);
+    }
+
+    private static Collection<Player> playersNear(Location center, double radius) {
+        List<Player> players = new ArrayList<>();
+        for (Entity entity : center.getWorld().getNearbyEntities(center, radius, radius, radius,
+                candidate -> candidate instanceof Player)) {
+            players.add((Player) entity);
+        }
+        return players;
+    }
+
     private static final float FRONT_PORTAL_INWARD = .2f;
     private static final float BACK_PORTAL_INWARD = -.1f;
     private static final float SEALED_BACKING_OUTWARD = .55f;
@@ -34,6 +50,8 @@ public final class PreviewService {
     private static final long OCCLUSION_SLOW_MILLIS = 250L;
     private final JavaPlugin plugin;
     private final InteriorService interiors;
+    private final RuntimeAdapter runtime;
+    private final VirtualEntityFactory virtualEntities;
     private final NamespacedKey displayKey;
     private final Map<UUID, JarScene> scenes = new HashMap<>();
     private final Map<UUID, OutsideSleeper> outsideSleepers = new HashMap<>();
@@ -85,9 +103,11 @@ public final class PreviewService {
     private volatile long chunkTicketGeneration;
     private boolean sessionReconcilePending = true;
 
-    public PreviewService(JavaPlugin plugin, InteriorService interiors) {
+    public PreviewService(JavaPlugin plugin, InteriorService interiors, RuntimeAdapter runtime) {
         this.plugin = plugin;
         this.interiors = interiors;
+        this.runtime = runtime;
+        this.virtualEntities = runtime.virtualEntities();
         this.displayKey = new NamespacedKey(plugin, "preview_jar");
     }
 
@@ -239,7 +259,7 @@ public final class PreviewService {
         scene.removeAvatar(player.getUniqueId(), scene.sleepers);
         Location sleeping = location.clone();
         sleeping.setPitch(90f);
-        VirtualMannequin body = new VirtualMannequin(player, sleeping, 1f);
+        VirtualMannequin body = virtualEntities.createMannequin(player, sleeping, 1f);
         body.sleep(sleeping, List.of());
         scene.sleepers.put(player.getUniqueId(), new Avatar(body));
         showTo(scene.interiorViewers, List.of(body));
@@ -249,7 +269,7 @@ public final class PreviewService {
         wake(player.getUniqueId());
         Location sleeping = location.clone();
         sleeping.setPitch(90f);
-        VirtualMannequin body = new VirtualMannequin(player, sleeping, 1f);
+        VirtualMannequin body = virtualEntities.createMannequin(player, sleeping, 1f);
         body.sleep(sleeping, List.of());
         outsideSleepers.put(player.getUniqueId(),
                 new OutsideSleeper(body, sleeping, new HashSet<>()));
@@ -579,16 +599,16 @@ public final class PreviewService {
         List<CompletableFuture<ChunkSnapshot>> batch = new ArrayList<>(end - start);
         for (int index = start; index < end; index++) {
             ChunkCoordinate coordinate = coordinates.get(index);
-            batch.add(world.getChunkAtAsync(coordinate.x, coordinate.z, false)
+            batch.add(runtime.loadChunk(world, coordinate.x, coordinate.z, false)
                     .thenApply(chunk -> chunk == null ? null
-                            : chunk.getChunkSnapshot(false, false, false, false))
+                            : chunk.getChunkSnapshot(false, false, false))
                     .exceptionally(ignored -> null));
         }
         CompletableFuture.allOf(batch.toArray(CompletableFuture[]::new)).thenRun(() -> {
             for (CompletableFuture<ChunkSnapshot> future : batch) {
                 ChunkSnapshot snapshot = future.join();
                 if (snapshot != null) {
-                    snapshots.put(Chunk.getChunkKey(snapshot.getX(), snapshot.getZ()), snapshot);
+                    snapshots.put(chunkKey(snapshot.getX(), snapshot.getZ()), snapshot);
                 }
             }
             if (end >= coordinates.size()) {
@@ -699,7 +719,7 @@ public final class PreviewService {
                 continue;
             }
             scheduled++;
-            world.getChunkAtAsync(requested.x, requested.z, true).whenComplete((chunk, error) ->
+            runtime.loadChunk(world, requested.x, requested.z, true).whenComplete((chunk, error) ->
                     completeChunkTicketLoad(requested, generation, chunk, error));
         }
     }
@@ -965,7 +985,7 @@ public final class PreviewService {
         // Sub-pixel shrink so touching boxes (and the glass faces) never share a plane and z-fight.
         float epsilon = 0.0005f;
         for (InteriorBox box : boxes) {
-            VirtualBlockDisplay display = new VirtualBlockDisplay(origin, box.blockData, new Matrix4f()
+            VirtualBlockDisplay display = virtualEntities.createBlockDisplay(origin, box.blockData, new Matrix4f()
                     .translation(-.5f + box.x * unit + epsilon, box.y * unit + epsilon, -.5f + box.z * unit + epsilon)
                     .scale(box.sx * unit - 2 * epsilon, box.sy * unit - 2 * epsilon, box.sz * unit - 2 * epsilon));
             scene.exteriorBlocks.add(display);
@@ -976,7 +996,7 @@ public final class PreviewService {
     private void spawnExteriorPortal(JarScene scene) {
         if (!scene.jar.hasPortal()) return;
         org.bukkit.block.BlockFace door = scene.jar.door();
-        scene.exteriorPortal = new VirtualBlockDisplay(
+        scene.exteriorPortal = virtualEntities.createBlockDisplay(
                 scene.jar.outsideLocation(), portalData(door), portalTransformation(scene.jar, 0f));
     }
 
@@ -1022,7 +1042,7 @@ public final class PreviewService {
         Location center = new Location(interiors.world(), cell.minX() + halfX,
                 cell.minY() + halfY, cell.minZ() + halfZ);
         for (OutsideSample sample : samples) {
-            VirtualBlockDisplay display = new VirtualBlockDisplay(center, sample.blockData, new Matrix4f()
+            VirtualBlockDisplay display = virtualEntities.createBlockDisplay(center, sample.blockData, new Matrix4f()
                     .translation(sample.dx * (float) scale - halfX, sample.dy * (float) scale - halfY,
                             sample.dz * (float) scale - halfZ)
                     .scale((float) scale));
@@ -1040,7 +1060,7 @@ public final class PreviewService {
                 cell.minY() + halfY, cell.minZ() + halfZ);
         for (FloorSample sample : samples) {
             if (!renderable(sample.blockData.getMaterial(), true)) continue;
-            VirtualBlockDisplay display = new VirtualBlockDisplay(center, sample.blockData,
+            VirtualBlockDisplay display = virtualEntities.createBlockDisplay(center, sample.blockData,
                     // Keep its top face just below the barrier floor to avoid display collisions.
                     new Matrix4f().translation(sample.cellX * scale - halfX,
                             (sample.cellY - 1) * scale + 1f - FLOOR_BLOCK_DROP - halfY,
@@ -1163,7 +1183,7 @@ public final class PreviewService {
     }
 
     private void spawnSurface(JarScene scene, Location center, BlockData blockData, Matrix4f transformation) {
-        scene.interiorBlocks.add(new VirtualBlockDisplay(center, blockData, transformation));
+        scene.interiorBlocks.add(virtualEntities.createBlockDisplay(center, blockData, transformation));
     }
 
     private static BlockData portalData(org.bukkit.block.BlockFace door) {
@@ -1184,9 +1204,10 @@ public final class PreviewService {
         for (Player target : interiors.occupants(scene.jar)) {
             if (present.size() >= maximum || !exteriorEnabled) break;
             present.add(target.getUniqueId());
-            double x = (target.getX() - cell.minX()) / scene.jar.scale() - .5;
-            double y = (target.getY() - cell.minY()) / scene.jar.scale();
-            double z = (target.getZ() - cell.minZ()) / scene.jar.scale() - .5;
+            Location targetLocation = target.getLocation();
+            double x = (targetLocation.getX() - cell.minX()) / scene.jar.scale() - .5;
+            double y = (targetLocation.getY() - cell.minY()) / scene.jar.scale();
+            double z = (targetLocation.getZ() - cell.minZ()) / scene.jar.scale() - .5;
             Location mapped = scene.jar.outsideLocation().clone().add(.5 + x, y, .5 + z);
             updateAvatar(scene, scene.occupants, target, mapped, 1f / scene.jar.scale(), scene.exteriorViewers);
         }
@@ -1206,7 +1227,7 @@ public final class PreviewService {
         Location jar = scene.jar.outsideCenter();
         Set<UUID> present = new HashSet<>();
         int maximum = interiorMaximumPlayerMarkers;
-        for (Player target : jar.getWorld().getNearbyPlayers(jar, radius)) {
+        for (Player target : playersNear(jar, radius)) {
             if (present.size() >= maximum) break;
             if (target.getLocation().distanceSquared(jar) > radius * radius) continue;
             present.add(target.getUniqueId());
@@ -1233,7 +1254,7 @@ public final class PreviewService {
                               float scale, Set<UUID> viewers) {
         Avatar avatar = avatars.get(target.getUniqueId());
         if (avatar == null) {
-            VirtualMannequin body = new VirtualMannequin(target, location, scale);
+            VirtualMannequin body = virtualEntities.createMannequin(target, location, scale);
             avatar = new Avatar(body);
             avatars.put(target.getUniqueId(), avatar);
             showTo(viewers, List.of(body));
@@ -1245,7 +1266,7 @@ public final class PreviewService {
 
     private Set<UUID> nearbyPlayers(Location center, double radius) {
         Set<UUID> result = new HashSet<>();
-        for (Player player : center.getWorld().getNearbyPlayers(center, radius)) {
+        for (Player player : playersNear(center, radius)) {
             if (player.getLocation().distanceSquared(center) <= radius * radius) result.add(player.getUniqueId());
         }
         return result;
@@ -1352,8 +1373,13 @@ public final class PreviewService {
             return;
         }
         try {
-            entityBackend = new ProtocolEntityPreview(plugin, interiors);
-            plugin.getLogger().info("Using ProtocolLib entity previews.");
+            entityBackend = runtime.createProtocolPreview(plugin, interiors);
+            if (entityBackend == null) {
+                plugin.getLogger().warning("The selected runtime adapter does not provide ProtocolLib previews; "
+                        + "using built-in mannequins.");
+            } else {
+                plugin.getLogger().info("Using ProtocolLib entity previews.");
+            }
         } catch (LinkageError | RuntimeException exception) {
             entityBackend = null;
             plugin.getLogger().warning("Could not start ProtocolLib entity previews; using mannequins: " + exception.getMessage());
@@ -1476,13 +1502,13 @@ public final class PreviewService {
 
         private Material type(int x, int y, int z) {
             if (y < minHeight || y >= maxHeight) return Material.AIR;
-            ChunkSnapshot snapshot = chunks.get(Chunk.getChunkKey(x >> 4, z >> 4));
+            ChunkSnapshot snapshot = chunks.get(chunkKey(x >> 4, z >> 4));
             return snapshot == null ? Material.AIR : snapshot.getBlockType(x & 15, y, z & 15);
         }
 
         private BlockData blockData(int x, int y, int z) {
             if (y < minHeight || y >= maxHeight) return Material.AIR.createBlockData();
-            ChunkSnapshot snapshot = chunks.get(Chunk.getChunkKey(x >> 4, z >> 4));
+            ChunkSnapshot snapshot = chunks.get(chunkKey(x >> 4, z >> 4));
             return snapshot == null ? Material.AIR.createBlockData()
                     : snapshot.getBlockData(x & 15, y, z & 15);
         }

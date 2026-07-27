@@ -69,7 +69,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.ConcurrentHashMap;
 
 /** Same-type, client-only entity mirrors transmitted through ProtocolLib. */
-final class ProtocolEntityPreview implements EntityPreviewBackend {
+public final class ProtocolEntityPreview implements EntityPreviewBackend {
     private static final AtomicInteger IDS = new AtomicInteger(1_900_000_000);
     // Mirrors vanilla ServerEntity's own thresholds for switching between relative move deltas and
     // a full position resync, so mirrored movement looks like normal entity tracking to the client.
@@ -93,7 +93,7 @@ final class ProtocolEntityPreview implements EntityPreviewBackend {
     private final int movementTaskId;
     private volatile boolean running = true;
 
-    ProtocolEntityPreview(JavaPlugin plugin, InteriorService interiors) {
+    public ProtocolEntityPreview(JavaPlugin plugin, InteriorService interiors) {
         this.plugin = plugin;
         this.interiors = interiors;
         this.protocol = ProtocolLibrary.getProtocolManager();

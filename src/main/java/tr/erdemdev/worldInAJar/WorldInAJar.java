@@ -5,6 +5,7 @@ import org.bukkit.command.PluginCommand;
 import org.bukkit.plugin.java.JavaPlugin;
 
 public final class WorldInAJar extends JavaPlugin {
+    private RuntimeAdapter runtime;
     private JarRepository repository;
     private JarItems items;
     private InteriorService interiors;
@@ -18,15 +19,16 @@ public final class WorldInAJar extends JavaPlugin {
 
     @Override public void onEnable() {
         saveDefaultConfig();
+        runtime = RuntimeAdapterLoader.load(this);
         policy = new TeleportPolicy();
         repository = new JarRepository(this); repository.load();
         items = new JarItems(this);
-        interiors = new InteriorService(this, policy); interiors.loadWorld();
+        interiors = new InteriorService(this, policy, runtime); interiors.loadWorld();
         distantHorizons = new DistantHorizonsIntegration(this);
         itemLore = new JarItemLoreService(this, repository, items, interiors);
-        previews = new PreviewService(this, interiors);
+        previews = new PreviewService(this, interiors, runtime);
         transfers = new PortalTransferService(this, repository, items, interiors, policy);
-        spectators = new SpectatorService(this, repository, items, interiors, previews, policy);
+        spectators = new SpectatorService(this, repository, items, interiors, previews, policy, runtime);
         back = new JarBackService(this, repository, items, interiors, previews, itemLore);
         // Recipe registrations survive some plugin managers' hot reload cycle. Remove the
         // old key first so enabling is idempotent instead of disabling the whole plugin.
@@ -59,6 +61,7 @@ public final class WorldInAJar extends JavaPlugin {
         if (previews != null) previews.stop();
         if (interiors != null) interiors.stop();
         if (repository != null) repository.close();
+        if (runtime != null) runtime.close();
         getServer().removeRecipe(recipeKey());
         if (items != null) getServer().removeRecipe(items.portalSideRecipeKey());
         removeLegacyCombinationRecipes();

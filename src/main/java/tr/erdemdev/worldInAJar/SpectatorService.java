@@ -1,9 +1,7 @@
 package tr.erdemdev.worldInAJar;
 
-import net.minecraft.network.protocol.game.ClientboundSetCameraPacket;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
-import org.bukkit.craftbukkit.entity.CraftPlayer;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.configuration.ConfigurationSection;
@@ -32,6 +30,7 @@ public final class SpectatorService {
     private final InteriorService interiors;
     private final PreviewService previews;
     private final TeleportPolicy policy;
+    private final RuntimeAdapter runtime;
     private final File file;
     private final Map<UUID, SpectatorRecovery> recoveries = new HashMap<>();
     private final Set<UUID> active = new HashSet<>();
@@ -40,13 +39,15 @@ public final class SpectatorService {
     private long tick;
 
     public SpectatorService(WorldInAJar plugin, JarRepository repository, JarItems items,
-                            InteriorService interiors, PreviewService previews, TeleportPolicy policy) {
+                            InteriorService interiors, PreviewService previews, TeleportPolicy policy,
+                            RuntimeAdapter runtime) {
         this.plugin = plugin;
         this.repository = repository;
         this.items = items;
         this.interiors = interiors;
         this.previews = previews;
         this.policy = policy;
+        this.runtime = runtime;
         file = new File(plugin.getDataFolder(), "spectators.yml");
     }
 
@@ -281,7 +282,11 @@ public final class SpectatorService {
             }
             if (player.getGameMode() != GameMode.SPECTATOR) player.setGameMode(GameMode.SPECTATOR);
             Entity current = player.getSpectatorTarget();
-            if (current == null || !carrier.getUniqueId().equals(current.getUniqueId())) target(player, carrier);
+            if (current != null && !carrier.getUniqueId().equals(current.getUniqueId())) {
+                restore(player, recovery);
+                continue;
+            }
+            if (current == null) target(player, carrier);
             lockCamera(player, carrier);
         }
     }
@@ -345,8 +350,7 @@ public final class SpectatorService {
      */
     private void lockCamera(Player spectator, Player carrier) {
         if (spectator.getGameMode() != GameMode.SPECTATOR || spectator.equals(carrier)) return;
-        ((CraftPlayer) spectator).getHandle().connection.send(
-                new ClientboundSetCameraPacket(((CraftPlayer) carrier).getHandle()));
+        runtime.setCamera(spectator, carrier);
     }
 
     private Player findCarrier(UUID jarId, UUID spectatorId) {

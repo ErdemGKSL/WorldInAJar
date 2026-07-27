@@ -2,6 +2,7 @@
 .gradle
 build
 run
+run-*/
 bin
 
 # Local release artifacts (release notes remain tracked)

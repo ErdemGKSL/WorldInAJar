@@ -1,8 +1,5 @@
 package tr.erdemdev.worldInAJar;
 
-import com.destroystokyo.paper.event.player.PlayerStartSpectatingEntityEvent;
-import io.papermc.paper.event.entity.EntityMoveEvent;
-import io.papermc.paper.event.player.PlayerInventorySlotChangeEvent;
 import org.bukkit.Material;
 import org.bukkit.Location;
 import org.bukkit.block.Block;
@@ -14,10 +11,8 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.*;
 import org.bukkit.event.entity.EntityExplodeEvent;
-import org.bukkit.event.entity.EntityRemoveEvent;
 import org.bukkit.event.entity.ItemMergeEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
-import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Tag;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.ClickType;
@@ -304,16 +299,10 @@ public final class JarListener implements Listener {
         spectators.restore(event.getPlayer());
     }
 
-    @EventHandler(priority = EventPriority.HIGHEST)
-    public void onStartSpectating(PlayerStartSpectatingEntityEvent event) {
-        if (spectators.allowsTarget(event.getPlayer(), event.getNewSpectatorTarget())) return;
-        event.setCancelled(true);
-        spectators.leaveOnForeignTarget(event.getPlayer());
-    }
-
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onMove(PlayerMoveEvent event) {
         org.bukkit.Location from = event.getFrom(), to = event.getTo();
+        transfers.move(event.getPlayer(), from, to);
         if (from.getWorld() == to.getWorld()
                 && from.getBlockX() == to.getBlockX()
                 && from.getBlockY() == to.getBlockY()
@@ -398,12 +387,12 @@ public final class JarListener implements Listener {
 
     @EventHandler(priority = EventPriority.MONITOR)
     public void onDeath(PlayerDeathEvent event) {
-        UUID jarId = interiors.sessionId(event.getPlayer());
+        UUID jarId = interiors.sessionId(event.getEntity());
         if (jarId == null) {
-            JarRecord jar = jarAt(event.getPlayer().getLocation());
+            JarRecord jar = jarAt(event.getEntity().getLocation());
             jarId = jar == null ? null : jar.id();
         }
-        if (jarId != null) deathJars.put(event.getPlayer().getUniqueId(), jarId);
+        if (jarId != null) deathJars.put(event.getEntity().getUniqueId(), jarId);
         UUID refreshId = jarId;
         plugin.getServer().getScheduler().runTask(plugin, () -> itemLore.refresh(refreshId));
     }
@@ -455,7 +444,7 @@ public final class JarListener implements Listener {
     /** Jars may be renamed in anvils but never used as repair material. */
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onPrepareAnvil(PrepareAnvilEvent event) {
-        if (items.isJar(event.getInventory().getSecondItem())) event.setResult(null);
+        if (items.isJar(event.getInventory().getItem(1))) event.setResult(null);
     }
 
     /** Persists an anvil rename so the jar keeps its name in menus, commands, and future drops. */
@@ -467,8 +456,7 @@ public final class JarListener implements Listener {
         UUID id = items.id(result);
         if (id == null || repository.byId(id).isEmpty()) return;
         ItemMeta meta = result.getItemMeta();
-        String name = meta != null && meta.hasDisplayName()
-                ? PlainTextComponentSerializer.plainText().serialize(meta.displayName()) : null;
+        String name = meta != null && meta.hasDisplayName() ? meta.getDisplayName() : null;
         repository.rename(id, name);
     }
 
@@ -487,12 +475,6 @@ public final class JarListener implements Listener {
         if (items.isJar(event.getEntity().getItemStack()) || items.isJar(event.getTarget().getItemStack())) {
             event.setCancelled(true);
         }
-    }
-
-    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    public void onEntityMove(EntityMoveEvent event) {
-        if (!event.hasChangedPosition()) return;
-        transfers.move(event.getEntity(), event.getFrom(), event.getTo());
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -522,28 +504,10 @@ public final class JarListener implements Listener {
         event.getView().setCursor(null);
     }
 
-    @EventHandler(priority = EventPriority.MONITOR)
-    public void onItemRemoved(EntityRemoveEvent event) {
-        if (!(event.getEntity() instanceof Item item) || !destructive(event.getCause())) return;
-        UUID id = items.id(item.getItemStack());
-        if (id != null) checkDeletedNextTick(id);
-    }
-
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onPlayerDropItem(PlayerDropItemEvent event) {
         UUID id = items.id(event.getItemDrop().getItemStack());
         if (id != null) spectators.carrierDropped(event.getPlayer(), id);
-    }
-
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    public void onInventorySlotChange(PlayerInventorySlotChangeEvent event) {
-        UUID previous = items.id(event.getOldItemStack());
-        UUID current = items.id(event.getNewItemStack());
-        if (current != null) {
-            plugin.getServer().getScheduler().runTask(plugin, () -> itemLore.refresh(current));
-        }
-        if (previous == null || previous.equals(current)) return;
-        checkDeletedNextTick(previous);
     }
 
     private void refreshAfterTransition(Player player, Location from, Location to) {
@@ -606,7 +570,7 @@ public final class JarListener implements Listener {
                 if (entity instanceof InventoryHolder holder && contains(holder.getInventory().getContents(), id)) return true;
             }
             for (org.bukkit.Chunk chunk : world.getLoadedChunks()) {
-                for (org.bukkit.block.BlockState state : chunk.getTileEntities(false)) {
+                for (org.bukkit.block.BlockState state : chunk.getTileEntities()) {
                     if (state instanceof InventoryHolder holder && contains(holder.getInventory().getContents(), id)) return true;
                 }
             }
@@ -924,13 +888,6 @@ public final class JarListener implements Listener {
             block.setType(material, false);
             previews.transportBlock(block.getLocation());
         }
-    }
-
-    private static boolean destructive(EntityRemoveEvent.Cause cause) {
-        return switch (cause) {
-            case DEATH, DESPAWN, EXPLODE, OUT_OF_WORLD, PLUGIN, DISCARD -> true;
-            default -> false;
-        };
     }
 
     private static BlockFace horizontalOpposite(BlockFace facing) {
