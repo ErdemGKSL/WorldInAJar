@@ -39,7 +39,7 @@ The removable [B]Jar Portal Side[/B] uses a 2×2 square of glass panes. Place th
 [*][B]Server:[/B] Bukkit, Spigot, or Paper on 1.21.11, 26.1, 26.1.1, 26.1.2, or 26.2
 [*][B]Java:[/B] 25
 [*][B]Required dependencies:[/B] None
-[*][B]Optional dependency:[/B] A ProtocolLib build compatible with Minecraft 1.21.11, only when using the protocol entity-preview backend on 1.21.11
+[*][B]Optional dependency:[/B] A ProtocolLib build compatible with your server version, only when using the protocol entity-preview backend
 [/LIST]
 
 [COLOR=#FFAA00][B]Important:[/B][/COLOR] Version-specific runtime adapters are bundled in one JAR. Use only the server versions listed above.

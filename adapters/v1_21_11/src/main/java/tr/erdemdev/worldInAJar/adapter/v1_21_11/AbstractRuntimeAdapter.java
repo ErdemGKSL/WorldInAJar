@@ -114,7 +114,6 @@ public abstract class AbstractRuntimeAdapter implements RuntimeAdapter {
 
     @Override
     public EntityPreviewBackend createProtocolPreview(JavaPlugin plugin, InteriorService interiors) {
-        if (!("1.21" + ".11").equals(minecraftVersion())) return null;
         try {
             Class<?> type = Class.forName("tr.erdemdev.worldInAJar.ProtocolEntityPreview", true,
                     plugin.getClass().getClassLoader());

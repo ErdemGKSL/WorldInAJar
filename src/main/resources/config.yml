@@ -1,4 +1,4 @@
-# Entity preview backend: manequeen (built-in) or protocol (requires ProtocolLib with 1.21.11 support).
+# Entity preview backend: manequeen (built-in) or protocol (requires a compatible ProtocolLib build).
 entity-preview: manequeen
 
 # Optional integration with DH Support (the Distant Horizons Paper plugin). While a player is in

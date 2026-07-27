@@ -115,7 +115,7 @@ Aliases for [B]/jar[/B] are [B]/worldinajar[/B] and [B]/wiaj[/B].
 [B]Entity previews[/B]
 
 [LIST]
-[*][B]entity-preview[/B] — [B]manequeen[/B] uses the built-in packet backend. [B]mannequin[/B] is accepted as an alias. [B]protocol[/B] requires ProtocolLib compatible with 1.21.11.
+[*][B]entity-preview[/B] — [B]manequeen[/B] uses the built-in packet backend. [B]mannequin[/B] is accepted as an alias. [B]protocol[/B] requires ProtocolLib compatible with your server version.
 [/LIST]
 
 [B]Jar sizing and recovery[/B]
