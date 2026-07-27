@@ -66,15 +66,37 @@ public final class InteriorService {
     public void loadWorld() {
         world = Bukkit.getWorld(worldName);
         if (world == null) {
+            // EmptyGenerator already supplies the blank interior. Paper 26.1.1 rejects a
+            // FLAT preset without layer data, so do not request the flat-world preset.
             world = new WorldCreator(worldName).environment(World.Environment.NORMAL)
-                    .type(WorldType.FLAT).generator(new EmptyGenerator()).generateStructures(false).createWorld();
+                    .generator(new EmptyGenerator()).generateStructures(false).createWorld();
         }
         if (world == null) throw new IllegalStateException("Paper could not create the jar interior world");
         world.setAutoSave(true);
-        world.setGameRule(GameRule.SPAWN_MOBS,
+        setBooleanRule(world, "SPAWN_MOBS", "DO_MOB_SPAWNING",
                 plugin.getConfig().getBoolean("interior.mob-spawning", true));
-        world.setGameRule(GameRule.ADVANCE_WEATHER, false);
+        setBooleanRule(world, "ADVANCE_WEATHER", "DO_WEATHER_CYCLE", false);
         clearWeather();
+    }
+
+    @SuppressWarnings("unchecked")
+    private void setBooleanRule(World target, String currentField, String legacyField, boolean value) {
+        GameRule<?> rule = gameRuleField(currentField);
+        if (rule == null) rule = gameRuleField(legacyField);
+        if (rule == null) {
+            plugin.getLogger().warning("No game rule found for " + currentField + "/" + legacyField + ".");
+            return;
+        }
+        target.setGameRule((GameRule<Boolean>) rule, value);
+    }
+
+    private static GameRule<?> gameRuleField(String fieldName) {
+        try {
+            Object value = GameRule.class.getField(fieldName).get(null);
+            return value instanceof GameRule<?> rule ? rule : null;
+        } catch (ReflectiveOperationException ignored) {
+            return null;
+        }
     }
 
     public World world() { return world; }

@@ -27,6 +27,12 @@ class RuntimeAdapterLoaderTest {
     }
 
     @Test
+    void normalizesPaperBuildVersionBeforeChoosingTheAdapter() {
+        assertEquals("26.1.1", RuntimeAdapterLoader.normalizeMinecraftVersion("26.1.1.build.29"));
+        assertEquals("26.1.1", RuntimeAdapterLoader.normalizeMinecraftVersion("26.1.1"));
+    }
+
+    @Test
     void rejectsOtherUnknownFamilies() {
         assertThrows(IllegalStateException.class, () -> RuntimeAdapterLoader.select("26.2.1"));
         assertThrows(IllegalStateException.class, () -> RuntimeAdapterLoader.select("26.3"));
