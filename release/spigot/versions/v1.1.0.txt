@@ -1,0 +1,26 @@
+[SIZE=5][COLOR=#55FFFF][B]World In A Jar 1.1.0[/B][/COLOR][/SIZE]
+
+World In A Jar 1.1.0 is the first stable storefront release.
+
+[B]Highlights[/B]
+
+[LIST]
+[*]Craft, place, enter, pick up, and carry persistent miniature worlds.
+[*]See live previews in both directions: the jar interior from outside and the surrounding world from inside.
+[*]Move players, mobs, items, and projectiles through jar portals.
+[*]Inspect a carried jar from the inventory while its holder continues moving.
+[*]Attach jars into larger modular spaces and detach them without losing their interiors.
+[*]Recover eligible lost jars with [B]/jar back[/B].
+[*]Keep jar interiors isolated with configurable teleport and respawn protection.
+[*]Insert portal-transferred items directly into attached hoppers.
+[*]Improved preview performance with hidden-block culling, tick budgets, and optional Distant Horizons integration.
+[/LIST]
+
+[B]Requirements[/B]
+
+[LIST]
+[*]Paper 1.21.11
+[*]Java 21
+[/LIST]
+
+ProtocolLib is optional and is needed only for the [B]protocol[/B] entity-preview backend.
