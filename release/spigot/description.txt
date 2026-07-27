@@ -1,9 +1,13 @@
-[CENTER][SIZE=6][COLOR=#55FFFF][B]WORLD IN A JAR[/B][/COLOR][/SIZE]
+[CENTER][SIZE=6][COLOR=#55FFFF][B][ATTACH]971995[/ATTACH] [/B]
+[B]WORLD IN A JAR[/B][/COLOR][/SIZE]
 [I]A whole persistent world, small enough to carry.[/I][/CENTER]
 
 [SIZE=5][COLOR=#AA55FF][B]Turn glass into an adventure[/B][/COLOR][/SIZE]
 
 World In A Jar lets players craft glass jars that contain real, persistent, enterable miniature worlds. Place a jar in the outside world and its interior appears inside it as a live miniature scene. Step through its portal to build, survive, store items, and share the space at full size.
+
+[ATTACH=full]971997[/ATTACH] [ATTACH=full]972000[/ATTACH]
+[SIZE=5][COLOR=#55FFFF][B]Highlights[/B][/COLOR][/SIZE]
 
 [SIZE=5][COLOR=#55FFFF][B]Highlights[/B][/COLOR][/SIZE]
 
