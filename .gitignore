@@ -3,3 +3,7 @@
 build
 run
 bin
+
+# Local release artifacts (release notes remain tracked)
+release/spigot/versions/*.jar
+release/paper/versions/*.jar

@@ -10,6 +10,17 @@ A Paper (Minecraft 1.21.11) plugin: craftable glass jars containing persistent, 
 
 Commit and push after every completed implementation.
 
+## Releases
+
+- Use semantic versions (`MAJOR.MINOR.PATCH`) in `gradle.properties`; development versions end
+  in `-SNAPSHOT` and release versions do not.
+- Keep storefront material in both `release/spigot/` and `release/paper/`. For a release
+  `X.Y.Z`, add matching user-facing notes at `release/spigot/versions/vX.Y.Z.txt` and
+  `release/paper/versions/vX.Y.Z.txt`.
+- After a successful release build, copy the versioned JAR from `build/libs/` to both
+  `release/spigot/versions/` and `release/paper/versions/`. Those JARs are local, ignored
+  artifacts; commit the notes and metadata, never the JARs.
+
 ## Commands
 
 - Build: `./gradlew build` (also runs tests and paperweight remapping)
