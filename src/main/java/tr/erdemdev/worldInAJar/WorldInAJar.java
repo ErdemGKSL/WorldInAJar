@@ -14,6 +14,7 @@ public final class WorldInAJar extends JavaPlugin {
     private SpectatorService spectators;
     private TeleportPolicy policy;
     private JarBackService back;
+    private DistantHorizonsIntegration distantHorizons;
 
     @Override public void onEnable() {
         saveDefaultConfig();
@@ -21,6 +22,7 @@ public final class WorldInAJar extends JavaPlugin {
         repository = new JarRepository(this); repository.load();
         items = new JarItems(this);
         interiors = new InteriorService(this, policy); interiors.loadWorld();
+        distantHorizons = new DistantHorizonsIntegration(this);
         itemLore = new JarItemLoreService(this, repository, items, interiors);
         previews = new PreviewService(this, interiors);
         transfers = new PortalTransferService(this, repository, items, interiors, policy);
@@ -45,10 +47,12 @@ public final class WorldInAJar extends JavaPlugin {
         transfers.start();
         spectators.start();
         back.start();
+        distantHorizons.start();
         getLogger().info("Loaded " + repository.all().size() + " persistent world jar(s).");
     }
 
     @Override public void onDisable() {
+        if (distantHorizons != null) distantHorizons.stop();
         if (back != null) back.stop();
         if (spectators != null) spectators.stop();
         if (transfers != null) transfers.stop();

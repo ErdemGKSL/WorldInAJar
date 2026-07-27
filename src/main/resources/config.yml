@@ -1,6 +1,16 @@
 # Entity preview backend: manequeen (built-in) or protocol (requires ProtocolLib with 1.21.11 support).
 entity-preview: manequeen
 
+# Optional integration with DH Support (the Distant Horizons Paper plugin). While a player is in
+# the interior world, DH Support sends this per-world remote cap to their Distant Horizons client.
+# On leaving, DH Support automatically sends the outside world's normal policy again. This avoids
+# LOD terrain being drawn behind World in a Jar's block-display previews.
+distant-horizons:
+  enabled: true
+  # Zero hides all DH LODs in the interior. A positive value can be used for a deliberately
+  # limited horizon instead.
+  interior-render-distance: 0
+
 # Interior edge length in blocks. Existing jars retain the scale they were created with.
 # Note: previewed players/entities are resized with Minecraft's scale attribute, which the
 # game clamps to 1/16..16 on every client. With scale above 16, blocks still scale fully
