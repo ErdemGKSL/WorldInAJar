@@ -3,10 +3,10 @@
 [SIZE=5][COLOR=#AA55FF][B]Requirements and installation[/B][/COLOR][/SIZE]
 
 [LIST=1]
-[*]Run [B]Paper 1.21.11[/B] with [B]Java 21[/B].
+[*]Run [B]Bukkit, Spigot, or Paper 1.21.11, 26.1, 26.1.1, 26.1.2, or 26.2[/B] with [B]Java 25[/B].
 [*]Stop the server.
 [*]Place the World In A Jar plugin file in the server's [B]plugins[/B] folder.
-[*]Optional: install ProtocolLib 5.4.0 with Minecraft 1.21.11 support if you intend to select the [B]protocol[/B] entity-preview backend.
+[*]Optional on 1.21.11: install a compatible ProtocolLib build if you intend to select the [B]protocol[/B] entity-preview backend.
 [*]Start the server. The plugin creates [B]plugins/WorldInAJar/config.yml[/B], [B]plugins/WorldInAJar/jars.yml[/B], and the configured interior world.
 [/LIST]
 

@@ -1,0 +1,24 @@
+# World In A Jar 1.2.0
+
+World In A Jar 1.2.0 expands the plugin from one Paper release to a portable, multi-version
+server plugin distributed as a single JAR.
+
+## Highlights
+
+- Added one-JAR support for Minecraft 1.21.11, 26.1, 26.1.1, 26.1.2, and 26.2.
+- Added dynamically selected, version-specific runtime adapters.
+- Added dedicated Paper, Spigot, and Bukkit behavior behind a shared compatibility interface.
+- Paper adapters use asynchronous chunk loading and teleportation where available; portable
+  fallbacks run safely on the main server thread.
+- Added support for Paper API versions reported with a `.build.<number>` suffix.
+- Fixed Paper 26.1.1 interior-world creation and cross-version gamerule handling.
+- Fixed virtual block-display previews on Paper 26.2.
+- Moved the project and release runtime to Java 25.
+
+## Requirements
+
+- Paper 1.21.11, 26.1, 26.1.1, 26.1.2, or 26.2
+- Java 25
+
+ProtocolLib remains optional and is used only by the `protocol` entity-preview backend on
+Minecraft 1.21.11.

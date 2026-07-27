@@ -18,9 +18,9 @@ and survive at full size, then pick it up without losing anything inside.
 
 ## Requirements
 
-- Paper 1.21.11
-- Java 21
+- Paper 1.21.11, 26.1, 26.1.1, 26.1.2, or 26.2
+- Java 25
 
-ProtocolLib is optional and required only for the `protocol` entity-preview backend. DH Support
-is also optional; when installed, World In A Jar caps Distant Horizons LOD rendering while a
-player is inside a jar, preventing LOD terrain from conflicting with the interior preview.
+ProtocolLib is optional and required only for the `protocol` entity-preview backend on 1.21.11.
+DH Support is also optional; when installed, World In A Jar caps Distant Horizons LOD rendering
+while a player is inside a jar, preventing LOD terrain from conflicting with the interior preview.

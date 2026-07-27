@@ -32,12 +32,12 @@ The removable [B]Jar Portal Side[/B] uses a 2×2 square of glass panes. Place th
 [SIZE=5][COLOR=#55FFFF][B]Compatibility[/B][/COLOR][/SIZE]
 
 [LIST]
-[*][B]Server:[/B] Paper 1.21.11
-[*][B]Java:[/B] 21
+[*][B]Server:[/B] Bukkit, Spigot, or Paper on 1.21.11, 26.1, 26.1.1, 26.1.2, or 26.2
+[*][B]Java:[/B] 25
 [*][B]Required dependencies:[/B] None
-[*][B]Optional dependency:[/B] ProtocolLib 5.4.0 with Minecraft 1.21.11 support, only when using the protocol entity-preview backend
+[*][B]Optional dependency:[/B] A ProtocolLib build compatible with Minecraft 1.21.11, only when using the protocol entity-preview backend on 1.21.11
 [/LIST]
 
-[COLOR=#FFAA00][B]Important:[/B][/COLOR] This plugin uses Paper/NMS internals and is built specifically for Minecraft 1.21.11. Other Minecraft versions are not supported by this build.
+[COLOR=#FFAA00][B]Important:[/B][/COLOR] Version-specific runtime adapters are bundled in one JAR. Use only the server versions listed above.
 
 [CENTER][B]Craft the jar. Build the world. Take it with you.[/B][/CENTER]
