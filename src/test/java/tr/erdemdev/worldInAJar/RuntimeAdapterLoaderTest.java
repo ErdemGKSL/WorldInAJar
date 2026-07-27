@@ -27,12 +27,16 @@ class RuntimeAdapterLoaderTest {
     }
 
     @Test
-    void mapsPaperBuildVersionToTwentySixOneOneAdapter() {
-        RuntimeAdapterLoader.Selection selection = RuntimeAdapterLoader.select("26.1.1.build.29");
+    void mapsPaperBuildVersionsToTheirAdapters() {
+        assertPaperBuildExact("1.21.11", "v1_21_11");
+        assertPaperBuildExact("26.1", "v26_1");
+        assertPaperBuildExact("26.1.1", "v26_1_1");
+        assertPaperBuildExact("26.1.2", "v26_1_2");
+        assertPaperBuildExact("26.2", "v26_2");
 
-        assertTrue(selection.exact());
-        assertEquals("26.1.1", selection.adapterVersion());
-        assertTrue(selection.candidates().get("PAPER").contains(".v26_1_1.paper."));
+        RuntimeAdapterLoader.Selection fallback = RuntimeAdapterLoader.select("26.1.7.build.42");
+        assertFalse(fallback.exact());
+        assertEquals("26.1.2", fallback.adapterVersion());
     }
 
     @Test
@@ -55,6 +59,13 @@ class RuntimeAdapterLoaderTest {
         assertEquals(version, selection.adapterVersion());
         assertTrue(selection.candidates().get("BUKKIT").contains("." + packageToken + ".bukkit."));
         assertTrue(selection.candidates().get("SPIGOT").contains("." + packageToken + ".spigot."));
+        assertTrue(selection.candidates().get("PAPER").contains("." + packageToken + ".paper."));
+    }
+
+    private static void assertPaperBuildExact(String version, String packageToken) {
+        RuntimeAdapterLoader.Selection selection = RuntimeAdapterLoader.select(version + ".build.29");
+        assertTrue(selection.exact());
+        assertEquals(version, selection.adapterVersion());
         assertTrue(selection.candidates().get("PAPER").contains("." + packageToken + ".paper."));
     }
 }

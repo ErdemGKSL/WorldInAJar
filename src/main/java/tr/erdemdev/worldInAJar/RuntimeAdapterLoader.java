@@ -38,10 +38,8 @@ public final class RuntimeAdapterLoader {
         }
     }
 
-    static Selection select(String minecraft) {
-        if (minecraft.matches("26\\.1\\.1\\.build\\.\\d+")) {
-            return new Selection("26.1.1", V26_1_1, true);
-        }
+    static Selection select(String reportedVersion) {
+        String minecraft = stripPaperBuildSuffix(reportedVersion);
         Map<String, String> exact = switch (minecraft) {
             case "1.21.11" -> V1_21_11;
             case "26.1" -> V26_1;
@@ -63,6 +61,10 @@ public final class RuntimeAdapterLoader {
             return new Selection("26.1.2", V26_1_2, false);
         }
         throw unsupported(minecraft);
+    }
+
+    static String stripPaperBuildSuffix(String version) {
+        return version.replaceFirst("\\.build\\.\\d+$", "");
     }
 
     private static IllegalStateException unsupported(String minecraft) {
