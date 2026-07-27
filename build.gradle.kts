@@ -35,7 +35,10 @@ tasks {
     }
 
     processResources {
-        val props = mapOf("version" to version)
+        // Keep plugin.yml's expanded version correct when Gradle reuses its configuration/build cache.
+        val pluginVersion = version.toString()
+        inputs.property("pluginVersion", pluginVersion)
+        val props = mapOf("version" to pluginVersion)
         filesMatching("plugin.yml") {
             expand(props)
         }
