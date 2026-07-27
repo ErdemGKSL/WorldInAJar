@@ -64,9 +64,6 @@ public final class PortalTransferService {
     }
 
     public void move(LivingEntity entity, Location from, Location to) {
-        // Players enter and leave explicitly by right-clicking the portal.
-        // Collision-based transfer remains available for other living entities.
-        if (entity instanceof Player) return;
         if (onCooldown(entity)) return;
         if (to.getWorld() == interiors.world()) {
             JarRecord jar = containingJar(from, to);
@@ -120,7 +117,7 @@ public final class PortalTransferService {
         BoundingBox bounds = BoundingBox.of(center, jar.width() / 2.0 + 1.5,
                 jar.height() / 2.0 + 1.75, jar.depth() / 2.0 + 1.5);
         for (Entity candidate : center.getWorld().getNearbyEntities(bounds,
-                entity -> entity instanceof LivingEntity && !(entity instanceof Player))) {
+                entity -> entity instanceof LivingEntity)) {
             LivingEntity entity = (LivingEntity) candidate;
             Location to = entity.getLocation();
             Location from = previousLivingLocation(entity, to, seen);
@@ -131,7 +128,7 @@ public final class PortalTransferService {
     private void scanInteriorLiving(JarRecord jar, Set<UUID> seen) {
         BoundingBox bounds = interiorDoorBounds(jar).expand(.75);
         for (Entity candidate : interiors.world().getNearbyEntities(bounds,
-                entity -> entity instanceof LivingEntity && !(entity instanceof Player))) {
+                entity -> entity instanceof LivingEntity)) {
             LivingEntity entity = (LivingEntity) candidate;
             Location to = entity.getLocation();
             Location from = previousLivingLocation(entity, to, seen);
