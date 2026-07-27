@@ -302,7 +302,6 @@ public final class JarListener implements Listener {
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onMove(PlayerMoveEvent event) {
         org.bukkit.Location from = event.getFrom(), to = event.getTo();
-        transfers.move(event.getPlayer(), from, to);
         if (from.getWorld() == to.getWorld()
                 && from.getBlockX() == to.getBlockX()
                 && from.getBlockY() == to.getBlockY()
