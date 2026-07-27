@@ -9,11 +9,11 @@ plugins {
 
 dependencies {
     implementation(project(":core"))
-    runtimeOnly(project(":adapter-v1_21_11", configuration = "reobf"))
-    runtimeOnly(project(":adapter-v26_1"))
-    runtimeOnly(project(":adapter-v26_1_1"))
-    runtimeOnly(project(":adapter-v26_1_2"))
-    runtimeOnly(project(":adapter-v26_2"))
+    runtimeOnly(project(":adapters:v1_21_11", configuration = "reobf"))
+    runtimeOnly(project(":adapters:v26_1"))
+    runtimeOnly(project(":adapters:v26_1_1"))
+    runtimeOnly(project(":adapters:v26_1_2"))
+    runtimeOnly(project(":adapters:v26_2"))
 }
 
 java {

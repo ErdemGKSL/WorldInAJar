@@ -13,7 +13,7 @@ java {
 }
 
 val generateAdapterSources = tasks.register<Copy>("generateAdapterSources") {
-    from("../adapter-v1_21_11/src/main/java")
+    from("../v1_21_11/src/main/java")
     exclude("**/ProtocolEntityPreview.java")
     into(layout.buildDirectory.dir("generated/sources/adapter/java"))
     eachFile { path = path.replace("v1_21_11", "v26_1_2") }

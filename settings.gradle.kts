@@ -11,8 +11,8 @@ plugins {
 
 rootProject.name = "WorldInAJar"
 include("core")
-include("adapter-v1_21_11")
-include("adapter-v26_1")
-include("adapter-v26_1_1")
-include("adapter-v26_1_2")
-include("adapter-v26_2")
+include("adapters:v1_21_11")
+include("adapters:v26_1")
+include("adapters:v26_1_1")
+include("adapters:v26_1_2")
+include("adapters:v26_2")
